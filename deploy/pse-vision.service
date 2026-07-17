@@ -1,0 +1,20 @@
+[Unit]
+Description=PSE Vision - Object Measurement Backend + Web (single port, serves UI + API + Socket.IO)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__PSE_USER__
+WorkingDirectory=__PSE_HOME__
+Environment=FLASK_PORT=__PSE_PORT__
+Environment=PYTHONUNBUFFERED=1
+# Serve the built frontend (frontend/dist) + REST API + Socket.IO on one port.
+ExecStart=__PSE_HOME__/venv/bin/python python_scripts/backend_server.py
+Restart=always
+RestartSec=5
+# Give the OAK/USB devices time on cold boot
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

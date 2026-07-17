@@ -1,0 +1,125 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+.pnp
+.pnp.js
+
+# Build outputs
+frontend/dist/
+user_display/dist/
+user_display/dist-installer/
+user_display/release/
+python_scripts/dist/
+python_scripts/build/
+*.spec
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+system_config.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python embedded (ขนาดใหญ่ ~150MB)
+python_embedded/
+
+# Cache
+.cache/
+*.cache
+.eslintcache
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Captures
+captures/
+python_scripts/captures/
+
+# Large binary files
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+
+# Development
+.venv/
+__pycache__/
+
+# Build artifacts
+user_display/backend/
+*.7z
+*.blockmap
+builder-debug.yml
+builder-effective-config.yaml
+
+# Frontend specific
+frontend/Sending/
+frontend/Icon/
+
+# Local test virtualenv (created during development)
+.venv_test/
+
+# Sample images + detection prototype outputs (kept out of main branch;
+# detection work + its images go into a dedicated branch later)
+image/
+
+# Misc
+.DS_Store
+*.log

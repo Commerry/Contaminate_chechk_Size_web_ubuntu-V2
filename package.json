@@ -1,0 +1,8 @@
+{
+  "name": "pse-vision",
+  "version": "1.0.0",
+  "description": "PSE Vision - Dev launcher (runs backend + frontend together)",
+  "scripts": {
+    "dev": "node dev.js"
+  }
+}

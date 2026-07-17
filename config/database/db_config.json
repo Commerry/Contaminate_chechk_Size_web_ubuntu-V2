@@ -1,0 +1,15 @@
+{
+  "enabled": false,
+  "host": "10.0.191.15",
+  "username": "testchecksize",
+  "password": "passw0rd123",
+  "database": "OT-test",
+  "table": "tbl_testchecksize",
+  "port": 1433,
+  "measurement_triggers": 10,
+  "unlimited_mode": false,
+  "auto_save": false,
+  "session_active": false,
+  "lot": "",
+  "product_type": ""
+}

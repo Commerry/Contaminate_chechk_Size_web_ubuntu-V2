@@ -1,0 +1,19 @@
+[Unit]
+Description=PSE Vision Backend Server
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%INSTALL_DIR%/python_scripts
+ExecStart=/usr/bin/python3 %INSTALL_DIR%/python_scripts/backend_server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (if needed)
+# Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=multi-user.target

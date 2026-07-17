@@ -1,0 +1,20 @@
+[Unit]
+Description=PSE Vision Camera Worker
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+# Run from repository root so `python_scripts` is importable as a package
+WorkingDirectory=/home/pi/Desktop/Contaminate_chechk_Size-CM4/Contaminate_chechk_Size-CM4
+# Ensure python can import the local `python_scripts` package
+Environment=PYTHONPATH=/home/pi/Desktop/Contaminate_chechk_Size-CM4/Contaminate_chechk_Size-CM4
+ExecStart=/usr/bin/python3 -u python_scripts/camera_worker.py
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

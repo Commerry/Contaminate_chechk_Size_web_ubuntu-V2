@@ -1,0 +1,18 @@
+[
+  {
+    "id": "LOT-001",
+    "name": "Batch A-2024-03",
+    "type": "Rubber Type A",
+    "description": "Standard rubber parts",
+    "created_date": "2026-03-13T10:00:00",
+    "status": "active"
+  },
+  {
+    "id": "LOT-002",
+    "name": "Batch B-2024-03",
+    "type": "Rubber Type B",
+    "description": "Premium rubber parts",
+    "created_date": "2026-03-13T11:30:00",
+    "status": "active"
+  }
+]

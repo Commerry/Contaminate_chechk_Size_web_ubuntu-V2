@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=PSE Vision Kiosk
+Comment=Open the PSE Vision measurement UI full-screen on login
+Exec=__PSE_HOME__/deploy/start-kiosk.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
+# Small delay so the desktop/network settle before the browser starts
+X-GNOME-Autostart-Delay=5

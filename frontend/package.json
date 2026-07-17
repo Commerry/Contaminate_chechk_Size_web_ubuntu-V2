@@ -1,0 +1,27 @@
+{
+  "name": "object-measurement-ui",
+  "version": "1.0.0",
+  "description": "Vue.js UI for OAK Camera Object Measurement System",
+  "scripts": {
+    "dev": "concurrently --kill-others \"npm run backend\" \"npm run frontend\" --names \"BACKEND,FRONTEND\" --prefix-colors \"bgBlue.bold,bgGreen.bold\"",
+    "dev:win": "npx concurrently --kill-others \"npm run backend\" \"npm run frontend\" --names \"BACKEND,FRONTEND\" --prefix-colors \"bgBlue.bold,bgGreen.bold\"",
+    "dev:linux": "npx concurrently --kill-others \"npm run backend\" \"npm run frontend:linux\" --names \"BACKEND,FRONTEND\" --prefix-colors \"bgBlue.bold,bgGreen.bold\"",
+    "backend": "cd .. && python python_scripts/backend_server.py",
+    "frontend": "vite --host 0.0.0.0 --port 64020",
+    "frontend:linux": "npx vite --host 0.0.0.0",
+    "build": "vite build",
+    "build:linux": "npx vite build",
+    "preview": "vite preview --port 64020"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "pinia": "^2.1.7",
+    "socket.io-client": "^4.8.3",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "concurrently": "^8.2.2",
+    "vite": "^5.0.0"
+  }
+}

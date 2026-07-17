@@ -1,0 +1,23 @@
+{
+  "camera_active": 1,
+  "prediction_active": 0,
+  "zoom_level": 2.5,
+  "preview_width": 1920,
+  "preview_height": 1080,
+  "fps": 30,
+  "auto_focus": 1,
+  "auto_exposure": 1,
+  "auto_white_balance": 1,
+  "height_on": 0,
+  "contrast_mode": 0,
+  "depth_color_scheme": "gray",
+  "ground_distance_mm": 500,
+  "calibration_file": "",
+  "focal_length_px": 1075.0,
+  "confidence_threshold": 0.3,
+  "min_area": 2000,
+  "active_model": "",
+  "detector_type": "simple",
+  "last_updated": "2026-01-05T10:49:07.276923",
+  "version": "1.0"
+}

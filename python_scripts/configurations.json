@@ -1,0 +1,48 @@
+[
+  {
+    "id": 1,
+    "name": "Very Small (100-500 mm²)",
+    "target_area_min": 100,
+    "target_area_max": 500,
+    "tolerance": 30,
+    "enabled": true,
+    "created_at": "2026-02-26T00:00:00"
+  },
+  {
+    "id": 2,
+    "name": "test",
+    "target_area_min": 500,
+    "target_area_max": 1500,
+    "tolerance": 100,
+    "enabled": true,
+    "created_at": "2026-02-26T00:00:00",
+    "updated_at": "2026-03-06T10:58:29.402486"
+  },
+  {
+    "id": 3,
+    "name": "Medium (1500-3000 mm²)",
+    "target_area_min": 1500,
+    "target_area_max": 3000,
+    "tolerance": 150,
+    "enabled": true,
+    "created_at": "2026-02-26T00:00:00"
+  },
+  {
+    "id": 4,
+    "name": "Large (3000-6000 mm²)",
+    "target_area_min": 3000,
+    "target_area_max": 6000,
+    "tolerance": 300,
+    "enabled": true,
+    "created_at": "2026-02-26T00:00:00"
+  },
+  {
+    "id": 5,
+    "name": "Extra Large (6000+ mm²)",
+    "target_area_min": 6000,
+    "target_area_max": 15000,
+    "tolerance": 500,
+    "enabled": true,
+    "created_at": "2026-02-26T00:00:00"
+  }
+]
