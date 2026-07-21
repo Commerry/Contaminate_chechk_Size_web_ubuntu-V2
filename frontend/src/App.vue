@@ -794,7 +794,6 @@ let stateSyncInterval = null // ใหม่: สำหรับ sync state
 let clockTimer = null        // handle for the header clock so we can clear it
 let frameCount = 0
 let lastFpsUpdate = Date.now()
-let inactiveTicks = 0        // consecutive status polls reporting camera inactive
 
 const startDataPolling = () => {
   // Clear any existing interval
@@ -894,26 +893,21 @@ const startStateSyncPolling = () => {
       const response = await axios.get(`${apiBaseUrl}/api/camera/status`)
       const status = response.data
       
-      // Sync camera state. Guard downgrades: the backend can briefly report
-      // camera_active=false mid-reconnect while frames are still flowing over
-      // the socket — don't flip the UI to STANDBY / wipe ROI on a single blip.
-      if (status.camera_active !== isCameraActive.value) {
-        if (status.camera_active) {
-          inactiveTicks = 0
-          console.log('🔄 Camera state changed: active')
-          isCameraActive.value = true
-        } else {
-          inactiveTicks++
-          if (inactiveTicks >= 2) {   // require 2 consecutive inactive polls
-            console.log('🔄 Camera state changed: inactive')
-            isCameraActive.value = false
-            isContourDetecting.value = false
-            detections.value = []
-            currentObjectCount.value = 0
-          }
+      // The Start/Stop button reflects the USER'S INTENT (`should_run`), never
+      // the live device state. A reconnect, a dropped frame or a watchdog
+      // restart briefly sets camera_active=false, and syncing the button off
+      // that made the UI fall back to STANDBY on its own — after which contour
+      // detection refused to start even though frames were still arriving.
+      // The camera follows the button, not the other way round.
+      const shouldRun = status.should_run !== undefined ? status.should_run : status.camera_active
+      if (shouldRun !== isCameraActive.value) {
+        console.log('🔄 Camera intent changed:', shouldRun ? 'START' : 'STOP')
+        isCameraActive.value = shouldRun
+        if (!shouldRun) {
+          isContourDetecting.value = false
+          detections.value = []
+          currentObjectCount.value = 0
         }
-      } else {
-        inactiveTicks = 0
       }
       
       // Sync contour detection state
@@ -949,8 +943,12 @@ const startStateSyncPolling = () => {
       // Do NOT touch isConnected here — that is owned by the socket handlers,
       // otherwise the header badge flickers when the camera is merely unplugged.
       isCameraConnected.value = status.connected || false
-      if (!status.camera_active) {
+      if (!shouldRun) {
         cameraStatusMessage.value = 'Click "Start Camera" to begin'
+      } else if (!status.camera_active) {
+        cameraStatusMessage.value = status.recovering
+          ? 'Camera reconnecting...'
+          : 'Camera starting...'
       } else if (!status.hasDevice) {
         cameraStatusMessage.value = 'No OAK camera detected. Check USB, power, or network camera IP.'
       } else if (!status.has_frames) {
@@ -984,8 +982,10 @@ const checkCameraStatus = async () => {
     
     console.log('📹 Camera status from server:', status)
     
-    // Sync all states from backend
-    if (status.camera_active) {
+    // Sync all states from backend. `should_run` is the user's Start/Stop
+    // intent, which is what the button must follow (see startStateSyncPolling).
+    const shouldRun = status.should_run !== undefined ? status.should_run : status.camera_active
+    if (shouldRun) {
       isCameraActive.value = true
       isConnected.value = true
       isContourDetecting.value = status.contour_detection_active || false
@@ -1213,7 +1213,9 @@ onMounted(() => {
   // 🔄 Listen to camera state changes
   socket.on('camera_state_changed', (payload) => {
     console.log('🔄 Camera state changed:', payload)
-    isCameraActive.value = payload.active || false
+    // Follow the Start/Stop intent only — a failed init or a watchdog restart
+    // reports active=false while the user still wants the camera running.
+    isCameraActive.value = payload.should_run !== undefined ? payload.should_run : (payload.active || false)
     if (payload.active) {
       console.log('✅ Auto-synced: Camera started from another client')
     } else {

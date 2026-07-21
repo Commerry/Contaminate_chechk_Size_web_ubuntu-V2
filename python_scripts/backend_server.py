@@ -2663,7 +2663,7 @@ def _camera_init_worker():
         if success:
             print("=== Camera initialized successfully! ===")
             system_config.set('camera_active', 1, auto_save=True)
-            socketio.emit('camera_state_changed', {'active': True})
+            socketio.emit('camera_state_changed', {'active': True, 'should_run': camera_should_run})
         else:
             print("=== Camera initialization failed! ===")
             system_config.set('camera_active', 0, auto_save=True)
@@ -2671,12 +2671,12 @@ def _camera_init_worker():
             fail_message = 'No OAK camera detected. Check USB/CSI connection and power.'
             if network_camera_ip:
                 fail_message = f"Cannot connect to network camera at {network_camera_ip}. Verify IP/power/network."
-            socketio.emit('camera_state_changed', {'active': False, 'error': fail_message})
+            socketio.emit('camera_state_changed', {'active': False, 'should_run': camera_should_run, 'error': fail_message})
     except Exception as e:
         print(f"=== Camera init worker error: {e} ===")
         try:
             system_config.set('camera_active', 0, auto_save=True)
-            socketio.emit('camera_state_changed', {'active': False, 'error': str(e)})
+            socketio.emit('camera_state_changed', {'active': False, 'should_run': camera_should_run, 'error': str(e)})
         except Exception:
             pass
     finally:
@@ -2735,7 +2735,7 @@ def disconnect_camera():
         }, auto_save=True)
         
         # Emit Socket.IO event for real-time sync
-        socketio.emit('camera_state_changed', {'active': False})
+        socketio.emit('camera_state_changed', {'active': False, 'should_run': False})
         
         print("�� Camera explicitly stopped by user")
         return jsonify({
