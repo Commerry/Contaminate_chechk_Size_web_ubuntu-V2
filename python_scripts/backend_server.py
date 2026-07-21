@@ -2744,8 +2744,11 @@ def ensure_camera_recovery(reason="unknown", blocking=False):
     if not HAS_DEPTHAI or not camera_should_run:
         return False
 
-    is_connected, thread_alive, has_frames, frames_fresh, _ = _camera_health()
-    healthy = is_connected and thread_alive and frames_fresh
+    # Only hard failures need a full re-init here (thread died / device gone).
+    # A transient frame gap is handled inside camera_loop, so we do NOT reinit on
+    # stale-frames alone - that would drop a working stream and cause flicker.
+    is_connected, thread_alive, _, _, _ = _camera_health()
+    healthy = is_connected and thread_alive
     if healthy:
         return False
 
@@ -2756,8 +2759,8 @@ def ensure_camera_recovery(reason="unknown", blocking=False):
     try:
         recovery_in_progress = True
         # Re-check under the lock (another thread may have just fixed it).
-        is_connected, thread_alive, has_frames, frames_fresh, _ = _camera_health()
-        if is_connected and thread_alive and frames_fresh:
+        is_connected, thread_alive, _, _, _ = _camera_health()
+        if is_connected and thread_alive:
             return False
         print(f"[AUTO-RECOVERY] ♻️ Reconnecting camera (reason={reason})...")
         ok = initialize_oak_camera()
@@ -2789,10 +2792,9 @@ def camera_watchdog():
             if not camera_should_run or not HAS_DEPTHAI:
                 continue
             is_connected, thread_alive, has_frames, frames_fresh, tsf = _camera_health()
-            if not (is_connected and thread_alive and frames_fresh):
-                reason = ("thread_died" if not thread_alive else
-                          "device_down" if not is_connected else
-                          f"stale_frames({tsf:.0f}s)")
+            # Recover only on hard failures; let camera_loop ride out brief gaps.
+            if (not thread_alive) or (not is_connected):
+                reason = "thread_died" if not thread_alive else "device_down"
                 ensure_camera_recovery(reason=reason, blocking=True)
         except Exception as e:
             print(f"[WATCHDOG] ⚠️ error: {e}")
