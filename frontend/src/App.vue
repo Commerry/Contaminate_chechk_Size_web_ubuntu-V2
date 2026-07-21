@@ -687,9 +687,11 @@ const startCamera = async () => {
     
     if (result.success) {
       console.log('✅ Camera connection successful!')
-      addLog('Camera connected successfully', 'success')
+      addLog(result.initializing ? 'Camera is initializing...' : 'Camera connected successfully', result.initializing ? 'info' : 'success')
       isConnected.value = true
-      cameraStatusMessage.value = 'Camera connected. Waiting for live frames...'
+      cameraStatusMessage.value = result.initializing
+        ? 'Camera is initializing (PoE boot can take ~30s)...'
+        : 'Camera connected. Waiting for live frames...'
       // Start polling for frames and measurements immediately
       // Backend will initialize camera in background
       startDataPolling()

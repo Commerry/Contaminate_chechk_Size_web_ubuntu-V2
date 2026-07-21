@@ -6,7 +6,7 @@ class MeasurementService {
   constructor() {
     this.client = axios.create({
       baseURL: API_BASE_URL,
-      timeout: 30000, // 30 seconds for camera initialization
+      timeout: 60000, // camera init is started in the background, but PoE calls can still be slow
       headers: {
         'Content-Type': 'application/json'
       }

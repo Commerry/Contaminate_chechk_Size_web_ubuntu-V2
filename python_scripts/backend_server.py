@@ -2634,32 +2634,25 @@ def serve_static_files(path):
 # Backend API Routes
 # ============================================
 
-@app.route('/api/camera/connect', methods=['POST'])
-def connect_camera():
-    """Connect to OAK camera"""
-    global camera_active, camera_should_run
+camera_init_in_progress = False
+
+
+def _camera_init_worker():
+    """Initialize the OAK camera off the request thread.
+
+    A PoE camera needs to boot and receive the pipeline firmware, which can
+    take well over the browser's HTTP timeout. Doing it here keeps
+    /api/camera/connect fast and lets the UI follow progress via status
+    polling / Socket.IO instead of hanging on the request.
+    """
+    global camera_init_in_progress
     try:
-        # User intends the camera to run: from now on the watchdog will keep it
-        # alive / auto-reconnect it until disconnect is called.
-        camera_should_run = True
-
-        # For LAN camera, skip device detection (doesn't work with PoE)
-        # LAN camera will be connected directly via IP address in initialize_oak_camera()
-
-        # Initialize camera synchronously (wait for it to complete)
-        print("=== Starting camera initialization ===")
+        print("=== Starting camera initialization (background) ===")
         success = initialize_oak_camera()
-        
         if success:
             print("=== Camera initialized successfully! ===")
-            # Save camera state to config
             system_config.set('camera_active', 1, auto_save=True)
-            # Emit Socket.IO event for real-time sync
             socketio.emit('camera_state_changed', {'active': True})
-            return jsonify({
-                'success': True,
-                'message': 'Camera connected successfully'
-            })
         else:
             print("=== Camera initialization failed! ===")
             system_config.set('camera_active', 0, auto_save=True)
@@ -2667,15 +2660,44 @@ def connect_camera():
             fail_message = 'No OAK camera detected. Check USB/CSI connection and power.'
             if network_camera_ip:
                 fail_message = f"Cannot connect to network camera at {network_camera_ip}. Verify IP/power/network."
-            return jsonify({
-                'success': False,
-                'message': fail_message,
-                'camera_active': False,
-                'connected': False,
-                'hasDevice': oak_device is not None
-            }), 200
-            
+            socketio.emit('camera_state_changed', {'active': False, 'error': fail_message})
     except Exception as e:
+        print(f"=== Camera init worker error: {e} ===")
+        try:
+            system_config.set('camera_active', 0, auto_save=True)
+            socketio.emit('camera_state_changed', {'active': False, 'error': str(e)})
+        except Exception:
+            pass
+    finally:
+        camera_init_in_progress = False
+
+
+@app.route('/api/camera/connect', methods=['POST'])
+def connect_camera():
+    """Start connecting to the OAK camera (non-blocking)"""
+    global camera_active, camera_should_run, camera_init_in_progress
+    try:
+        # User intends the camera to run: from now on the watchdog will keep it
+        # alive / auto-reconnect it until disconnect is called.
+        camera_should_run = True
+
+        if camera_active and oak_device is not None:
+            return jsonify({'success': True, 'message': 'Camera already connected'})
+
+        if camera_init_in_progress:
+            return jsonify({'success': True, 'message': 'Camera is initializing...', 'initializing': True})
+
+        camera_init_in_progress = True
+        threading.Thread(target=_camera_init_worker, daemon=True, name='camera-init').start()
+
+        return jsonify({
+            'success': True,
+            'message': 'Camera is initializing...',
+            'initializing': True
+        })
+
+    except Exception as e:
+        camera_init_in_progress = False
         print(f"=== Camera connect error: {e} ===")
         system_config.set('camera_active', 0, auto_save=True)
         return jsonify({
