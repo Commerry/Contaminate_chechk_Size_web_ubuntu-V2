@@ -526,6 +526,17 @@ def camera_loop():
                                 frame_to_send = latest_annotated_frame if latest_annotated_frame is not None else latest_frame
                                 
                                 if frame_to_send is not None:
+                                    # ⚡ ย่อภาพก่อนส่ง: เฟรมเต็ม 1920x1080 base64 ≈ 300KB ต่อเฟรม
+                                    # ซึ่งท่อ Socket.IO ส่งไม่ทัน ทำให้ภาพบนเว็บขาดหาย/กระตุก
+                                    stream_max_width = 960
+                                    if frame_to_send.shape[1] > stream_max_width:
+                                        _scale = stream_max_width / float(frame_to_send.shape[1])
+                                        frame_to_send = cv2.resize(
+                                            frame_to_send,
+                                            (stream_max_width, int(frame_to_send.shape[0] * _scale)),
+                                            interpolation=cv2.INTER_AREA
+                                        )
+
                                     # ⚡ เข้ารหัส frame เป็น JPEG base64 (quality 65 = สมดุลระหว่างคุณภาพและขนาด)
                                     _, buffer = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, 65])
                                     frame_base64 = base64.b64encode(buffer).decode('utf-8')

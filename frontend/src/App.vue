@@ -1046,13 +1046,14 @@ onMounted(() => {
   
   // 🔥 Initialize Socket.IO connection (use dynamic server URL for multi-client support)
   const serverUrl = window.location.origin  // e.g. http://10.2.110.89:64020
-  // Polling only: the backend runs on the Flask/Werkzeug dev server which does
-  // not support WebSocket upgrades (client got "Invalid frame header" and
-  // looped connect/disconnect, making the live frames flicker). Long-polling is
-  // stable here and still delivers frame_update events fine.
+  // Always start on long-polling, then upgrade to WebSocket if the backend
+  // supports it (Werkzeug only does once `simple-websocket` is installed).
+  // Connecting with WebSocket first is what caused the "Invalid frame header"
+  // connect/disconnect loop and the flickering live view; an upgrade that fails
+  // simply leaves the session on polling instead of killing it.
   socket = io(serverUrl, {
-    transports: ['polling'],
-    upgrade: false,
+    transports: ['polling', 'websocket'],
+    upgrade: true,
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 1000
