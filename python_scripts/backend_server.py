@@ -7,6 +7,12 @@ This file provides REST API endpoints for the Vue.js frontend
 import os
 import sys
 
+# A PoE camera closes the XLink connection when the host stops servicing it for
+# longer than the device watchdog (4s by default). Any hiccup on the host side -
+# a slow Socket.IO client, a long detection pass - was enough to make the camera
+# "drop" while still answering ping. Give the link more headroom.
+os.environ.setdefault('DEPTHAI_WATCHDOG', '10000')
+
 # Set UTF-8 encoding for Windows console BEFORE any print statements
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -228,6 +234,16 @@ camera_should_run = False
 recovery_lock = threading.Lock()
 recovery_in_progress = False
 watchdog_thread = None
+
+# 📡 Frame publishing is handed to a dedicated thread. socketio.emit() blocks
+# until the payload is queued for every client, which on long-polling clients
+# can take seconds - and while the camera thread waits, it is not reading the
+# XLink queues, so the device watchdog kills the link. The camera thread now
+# only drops the newest payload here (latest-frame-wins) and moves on.
+emit_lock = threading.Lock()
+pending_frame_payload = None
+frame_emit_event = threading.Event()
+emitter_thread = None
 
 # ✅ Request throttling - ป้องกัน request ซ้ำเร็วเกินไป
 last_measurement_request_time = 0
@@ -545,21 +561,24 @@ def camera_loop():
                                     if frame_count % 30 == 0:
                                         print(f"[SOCKETIO] ✅ Emitting frame {frame_count}, size: {len(frame_base64)} bytes, detections: {len(detections)}")
                                     
-                                    # ส่งข้อมูลผ่าน SocketIO (พร้อมสถิติ)
-                                    socketio.emit('frame_update', {
-                                        'frame': frame_base64,
-                                        'measurements': all_measurements,
-                                        'detections_count': len(detections),
-                                        'statistics': measurement_statistics.copy(),
-                                        'active_setup': {
-                                            'machine_id': active_machine_id,
-                                            'machine_name': active_machine_name,
-                                            'lot_id': active_lot_id,
-                                            'lot_name': active_lot_name,
-                                            'config': active_measurement_config or fallback_measurement_config
-                                        },
-                                        'timestamp': datetime.now().isoformat()
-                                    })
+                                    # ส่งต่อให้ emitter thread (ห้าม emit ตรงนี้ - จะบล็อก XLink)
+                                    global pending_frame_payload
+                                    with emit_lock:
+                                        pending_frame_payload = {
+                                            'frame': frame_base64,
+                                            'measurements': all_measurements,
+                                            'detections_count': len(detections),
+                                            'statistics': measurement_statistics.copy(),
+                                            'active_setup': {
+                                                'machine_id': active_machine_id,
+                                                'machine_name': active_machine_name,
+                                                'lot_id': active_lot_id,
+                                                'lot_name': active_lot_name,
+                                                'config': active_measurement_config or fallback_measurement_config
+                                            },
+                                            'timestamp': datetime.now().isoformat()
+                                        }
+                                    frame_emit_event.set()
                                 else:
                                     if frame_count % 30 == 0:
                                         print(f"[SOCKETIO] ⚠️ frame_to_send is None at frame {frame_count}")
@@ -589,7 +608,7 @@ def camera_loop():
                     print(f" Attempt {recovery_attempts}/{max_recovery_attempts}...")
                     try:
                         time.sleep(0.5)
-                        initialize_oak_camera()
+                        _reinit_camera_serialized()
                         consecutive_errors = 0
                         last_success_time = time.time()
                         continue
@@ -658,7 +677,7 @@ def camera_loop():
                         
                         # Reinitialize
                         print(" Reinitializing LAN camera...")
-                        initialize_oak_camera()
+                        _reinit_camera_serialized()
                         
                         # Verify (รอนานขึ้นสำหรับ LAN)
                         time.sleep(3)
@@ -734,6 +753,12 @@ def initialize_oak_camera():
         # Create pipeline
         print("[STEP 3] Creating depthai pipeline...")
         pipeline = dai.Pipeline()
+        # Luxonis' recommended setting for PoE: send data in one chunk instead of
+        # splitting it, which lowers latency and keeps the link busy less often.
+        try:
+            pipeline.setXLinkChunkSize(0)
+        except Exception as _e:
+            print(f"    (XLink chunk size not applied: {_e})")
         
         # Define source - RGB camera (ใช้ค่าคงที่เพื่อความเสถียร)
         print("[STEP 4] Configuring RGB camera node...")
@@ -1044,8 +1069,13 @@ def initialize_oak_camera():
             pass
         return False
 
-def stop_oak_camera():
-    """Stop OAK camera with graceful shutdown"""
+def stop_oak_camera(user_initiated=False):
+    """Stop OAK camera with graceful shutdown.
+
+    `user_initiated` marks a real Stop press. A reconnect also passes through
+    here, and clearing the contour flag then silently switched detection off
+    behind the user's back once the camera came back.
+    """
     global oak_device, oak_pipeline, running, camera_thread, camera_active, latest_frame, latest_depth
     global tracked_objects, next_object_id, contour_detection_active
     
@@ -1062,7 +1092,8 @@ def stop_oak_camera():
         if not called_from_loop:
             running = False
             camera_active = False
-            contour_detection_active = False
+            if user_initiated:
+                contour_detection_active = False
 
         # Step 2: Wait for thread to finish gracefully (never join ourselves)
         if (not called_from_loop and camera_thread is not None
@@ -2726,9 +2757,9 @@ def disconnect_camera():
     try:
         # User intends the camera OFF: stop the watchdog from reconnecting it.
         camera_should_run = False
-        stop_oak_camera()
+        stop_oak_camera(user_initiated=True)
         camera_active = False
-        
+
         # Save states to config
         system_config.update({
             'camera_active': 0
@@ -2808,6 +2839,46 @@ def ensure_camera_recovery(reason="unknown", blocking=False):
     finally:
         recovery_in_progress = False
         recovery_lock.release()
+
+
+def _reinit_camera_serialized():
+    """initialize_oak_camera() guarded so only one re-init can run at a time.
+
+    The camera loop recovers on its own and the watchdog recovers too; when both
+    fired together they opened the device twice and each init closed the other's
+    connection, which looked exactly like a camera that keeps dropping.
+    """
+    if not recovery_lock.acquire(timeout=90):
+        print("[CAMERA] ⏭️ Re-init already in progress - skipping duplicate")
+        return False
+    try:
+        return initialize_oak_camera()
+    finally:
+        recovery_lock.release()
+
+
+def frame_emitter():
+    """Publish the newest frame payload to Socket.IO clients.
+
+    Runs outside the camera thread on purpose: a slow client must never stall
+    frame acquisition (see the note on `pending_frame_payload`). Only the latest
+    payload is sent - stale frames are dropped rather than queued.
+    """
+    global pending_frame_payload
+    print("[EMITTER] 📡 Frame emitter started")
+    while True:
+        try:
+            frame_emit_event.wait(timeout=1.0)
+            frame_emit_event.clear()
+            with emit_lock:
+                payload = pending_frame_payload
+                pending_frame_payload = None
+            if payload is None:
+                continue
+            socketio.emit('frame_update', payload)
+        except Exception as e:
+            print(f"[EMITTER] ⚠️ emit error: {e}")
+            time.sleep(0.5)
 
 
 def camera_watchdog():
@@ -5944,6 +6015,10 @@ if __name__ == '__main__':
     # ♻️ Start the autonomous camera watchdog (self-healing reconnect).
     # It only acts once the user starts the camera (camera_should_run=True) and
     # then keeps it connected without depending on any browser polling.
+    # 📡 Publish frames off the camera thread so a slow client cannot stall it.
+    emitter_thread = threading.Thread(target=frame_emitter, daemon=True, name='frame-emitter')
+    emitter_thread.start()
+
     if HAS_DEPTHAI:
         watchdog_thread = threading.Thread(target=camera_watchdog, daemon=True)
         watchdog_thread.start()
