@@ -301,11 +301,27 @@ const saveMachine = async () => {
       : '/api/machines'
     
     const method = editingMachine.value ? 'PUT' : 'POST'
-    
+
+    // Nest the target-area fields into `config` — the rest of the app reads the
+    // size target from machine.config.* (measurement start, detection, display).
+    const payload = {
+      id: formData.value.id,
+      name: formData.value.name,
+      description: formData.value.description,
+      location: formData.value.location,
+      status: formData.value.status,
+      config: {
+        name: formData.value.name,
+        target_area_min: formData.value.target_area_min,
+        target_area_max: formData.value.target_area_max,
+        tolerance: formData.value.tolerance
+      }
+    }
+
     const response = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(formData.value)
+      body: JSON.stringify(payload)
     })
     
     const data = await response.json()
