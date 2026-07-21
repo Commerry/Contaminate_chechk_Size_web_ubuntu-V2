@@ -45,6 +45,30 @@
         <span v-else class="badge badge-warning">Waiting</span>
       </div>
 
+      <!-- 🖥️ Web control: pick machine (= target) to start detection + capture to DB -->
+      <div class="detect-controls">
+        <label class="detect-label">Machine (Target)</label>
+        <select
+          class="detect-select"
+          :value="selectedMachineId"
+          @change="$emit('select-machine', $event.target.value)"
+        >
+          <option value="">— ไม่เลือก / หยุดตรวจจับ —</option>
+          <option v-for="m in machines" :key="m.id" :value="m.id">
+            {{ m.name }}<template v-if="m.config"> ({{ m.config.target_area_min }}–{{ m.config.target_area_max }} mm²)</template>
+          </option>
+        </select>
+        <button
+          class="btn btn-primary capture-btn"
+          :disabled="!isMeasuring"
+          @click="$emit('capture')"
+          title="ถ่ายภาพพร้อมกรอบ ROI แล้วบันทึกลงฐานข้อมูล"
+        >
+          <IconSvg name="capture" :size="18" />
+          ถ่าย + บันทึก DB
+        </button>
+      </div>
+
       <div class="setup-info-grid">
         <div class="setup-info-row">
           <span class="setup-info-label">เครื่องจักร</span>
@@ -226,8 +250,22 @@ const props = defineProps({
       lotName: '',
       config: null
     })
+  },
+  machines: {
+    type: Array,
+    default: () => []
+  },
+  selectedMachineId: {
+    type: [String, Number],
+    default: ''
+  },
+  isMeasuring: {
+    type: Boolean,
+    default: false
   }
 })
+
+const emit = defineEmits(['select-machine', 'capture'])
 
 const statistics = ref({
   totalMeasurements: 0,
@@ -935,6 +973,51 @@ defineExpose({ addLog })
   color: white;
   font-family: var(--font-mono);
   white-space: nowrap;
+}
+
+/* 🖥️ Web detection controls */
+.detect-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.detect-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.detect-select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-dark-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: border-color 0.2s ease;
+}
+
+.detect-select:hover,
+.detect-select:focus {
+  border-color: var(--primary-color);
+  outline: none;
+}
+
+.detect-select option {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.capture-btn {
+  width: 100%;
+  justify-content: center;
 }
 
 /* 🔧 Active Setup Info Panel */

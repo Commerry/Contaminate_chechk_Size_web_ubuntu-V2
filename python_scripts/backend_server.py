@@ -706,7 +706,7 @@ def initialize_oak_camera():
         network_camera_ip = system_config.get('network_camera_ip', '').strip()
         if network_camera_ip:
             print(f"   Network camera IP configured: {network_camera_ip}")
-            ensure_oak_poe_static_ip(system_config, dai_module=dai)
+            pass  # skip bootloader IP-scan (IP already set on camera; scan interferes with PoE connect)
         else:
             print(f"   Auto-detect mode (CSI/USB priority, no network IP configured)")
         
@@ -828,14 +828,19 @@ def initialize_oak_camera():
             print("[STEP 7.0] Acquired camera lock - proceeding to open device")
 
         # Build connection methods based on configuration
-        connection_methods = [
-            ('CSI/USB Auto-detect', 'auto'),  # All local cameras (CSI/USB)
-            ('USB2 Fallback', 'usb2'),         # USB 2.0 speed - more stable on some systems
-        ]
-
-        # Add network method only if IP is configured
+        # If a network camera IP is configured, try it FIRST (fast) so we don't
+        # waste ~25s failing USB methods before reaching the PoE camera (and the
+        # USB scan can disturb the PoE camera, breaking the later Network attempt).
         if network_camera_ip:
-            connection_methods.append(('Network', network_camera_ip))
+            connection_methods = [
+                ('Network', network_camera_ip),
+                ('CSI/USB Auto-detect', 'auto'),
+            ]
+        else:
+            connection_methods = [
+                ('CSI/USB Auto-detect', 'auto'),
+                ('USB2 Fallback', 'usb2'),
+            ]
 
         max_attempts_per_method = 3  # เพิ่มเป็น 3 attempts
         connection_success = False

@@ -98,6 +98,28 @@ class DatabaseService:
                 ended_at TEXT,
                 total_measurements INTEGER DEFAULT 0,
                 pass_count INTEGER DEFAULT 0,
+                near_pass_count INTEGER DEFAULT 0,
+                fail_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Capture sessions table (for snapshot captures)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tbl_capture_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                capture_id TEXT UNIQUE NOT NULL,
+                machine_id TEXT,
+                machine_name TEXT,
+                lot_id TEXT,
+                lot_name TEXT,
+                lot_type TEXT,
+                rubber_type TEXT,
+                image_path TEXT,
+                captured_at TEXT NOT NULL,
+                total_detected INTEGER DEFAULT 0,
+                pass_count INTEGER DEFAULT 0,
+                near_pass_count INTEGER DEFAULT 0,
                 fail_count INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -424,6 +446,170 @@ class DatabaseService:
             except:
                 pass
             return False, f"Failed to delete machine: {str(e)}"
+    
+    def insert_capture_session(self, capture_data):
+        """
+        Insert capture session statistics into database
+        
+        Args:
+            capture_data (dict): Capture session data with keys:
+                - capture_id: str (unique capture ID)
+                - machine_id: str
+                - machine_name: str
+                - lot_id: str
+                - lot_name: str
+                - lot_type: str
+                - rubber_type: str
+                - image_path: str
+                - total_detected: int
+                - pass_count: int
+                - near_pass_count: int
+                - fail_count: int
+        
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            # Connect if not connected
+            if not self.connection:
+                success, message = self.connect()
+                if not success:
+                    return False, message
+            
+            current_time = datetime.now()
+            
+            if self.db_type == 'sqlite':
+                # SQLite insert
+                query = """
+                    INSERT INTO tbl_capture_sessions 
+                    (capture_id, machine_id, machine_name, lot_id, lot_name, lot_type, 
+                     rubber_type, image_path, captured_at, total_detected, 
+                     pass_count, near_pass_count, fail_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                
+                values = (
+                    capture_data.get('capture_id', ''),
+                    capture_data.get('machine_id', ''),
+                    capture_data.get('machine_name', ''),
+                    capture_data.get('lot_id', ''),
+                    capture_data.get('lot_name', ''),
+                    capture_data.get('lot_type', ''),
+                    capture_data.get('rubber_type', 'black'),
+                    capture_data.get('image_path', ''),
+                    current_time.isoformat(),
+                    capture_data.get('total_detected', 0),
+                    capture_data.get('pass_count', 0),
+                    capture_data.get('near_pass_count', 0),
+                    capture_data.get('fail_count', 0)
+                )
+                
+                cursor = self.connection.cursor()
+                cursor.execute(query, values)
+                self.connection.commit()
+                row_id = cursor.lastrowid
+                cursor.close()
+                
+                return True, f"Capture session saved (ID: {row_id})"
+            
+            else:
+                # SQL Server insert (if needed in future)
+                query = """
+                    INSERT INTO tbl_capture_sessions 
+                    (capture_id, machine_id, machine_name, lot_id, lot_name, lot_type,
+                     rubber_type, image_path, captured_at, total_detected,
+                     pass_count, near_pass_count, fail_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                
+                values = (
+                    capture_data.get('capture_id', ''),
+                    capture_data.get('machine_id', ''),
+                    capture_data.get('machine_name', ''),
+                    capture_data.get('lot_id', ''),
+                    capture_data.get('lot_name', ''),
+                    capture_data.get('lot_type', ''),
+                    capture_data.get('rubber_type', 'black'),
+                    capture_data.get('image_path', ''),
+                    current_time,
+                    capture_data.get('total_detected', 0),
+                    capture_data.get('pass_count', 0),
+                    capture_data.get('near_pass_count', 0),
+                    capture_data.get('fail_count', 0),
+                    current_time
+                )
+                
+                cursor = self.connection.cursor()
+                cursor.execute(query, values)
+                self.connection.commit()
+                cursor.close()
+                
+                return True, "Capture session saved successfully"
+        
+        except Exception as e:
+            try:
+                if self.connection:
+                    self.connection.rollback()
+            except:
+                pass
+            return False, f"Failed to save capture session: {str(e)}"
+    
+    def get_capture_sessions(self, limit=50):
+        """
+        Get recent capture sessions from database
+        
+        Args:
+            limit (int): Maximum number of records to retrieve
+        
+        Returns:
+            tuple: (success, data/message)
+                data is a list of dicts with capture session information
+        """
+        try:
+            # Connect if not connected
+            if not self.connection:
+                success, message = self.connect()
+                if not success:
+                    return False, message
+            
+            query = """
+                SELECT id, capture_id, machine_id, machine_name, lot_id, lot_name, 
+                       lot_type, rubber_type, image_path, captured_at, 
+                       total_detected, pass_count, near_pass_count, fail_count, created_at
+                FROM tbl_capture_sessions
+                ORDER BY captured_at DESC
+                LIMIT ?
+            """
+            
+            cursor = self.connection.cursor()
+            cursor.execute(query, (limit,))
+            
+            # Fetch all rows
+            sessions = []
+            for row in cursor.fetchall():
+                sessions.append({
+                    'id': row[0],
+                    'capture_id': row[1],
+                    'machine_id': row[2],
+                    'machine_name': row[3],
+                    'lot_id': row[4],
+                    'lot_name': row[5],
+                    'lot_type': row[6],
+                    'rubber_type': row[7],
+                    'image_path': row[8],
+                    'captured_at': row[9],
+                    'total_detected': row[10],
+                    'pass_count': row[11],
+                    'near_pass_count': row[12],
+                    'fail_count': row[13],
+                    'created_at': row[14]
+                })
+            
+            cursor.close()
+            return True, sessions
+        
+        except Exception as e:
+            return False, f"Failed to get capture sessions: {str(e)}"
     
     def __enter__(self):
         """Context manager entry"""
