@@ -397,31 +397,34 @@ const fetchMachines = async () => {
   }
 }
 
-// Select a machine -> activate its target config + start contour detection
+// Select a machine -> activate its target config; start contour if camera is on
 const handleSelectMachine = async (machineId) => {
   selectedMachineId.value = machineId
   if (!machineId) { await stopMeasurementWeb(); return }
-  if (!isCameraActive.value) {
-    warning('เปิดกล้องก่อน (กด Start Camera)')
-    selectedMachineId.value = ''
-    return
-  }
   const machine = machines.value.find(m => String(m.id) === String(machineId))
   try {
+    // Activate the machine's size target (works even before the camera starts)
     const r = await axios.post(`${apiBaseUrl}/api/measurement/start`, {
       machine_id: machineId,
       machine_name: machine?.name || ''
     })
-    if (!r.data.success) { error(r.data.error || 'เริ่มการวัดไม่สำเร็จ'); selectedMachineId.value = ''; return }
-    // start contour + multi-object detection
-    await axios.post(`${apiBaseUrl}/api/camera/contour/start`).catch(() => {})
-    await axios.post(`${apiBaseUrl}/api/camera/multi-object/start`).catch(() => {})
+    if (!r.data.success) {
+      error(r.data.error || 'ตั้งเป้าหมายไม่สำเร็จ')
+      await stopMeasurementWeb()
+      return
+    }
     isMeasuring.value = true
-    isContourDetecting.value = true
-    success(`เริ่มตรวจจับ: ${machine?.name || machineId}`)
+    if (isCameraActive.value) {
+      await axios.post(`${apiBaseUrl}/api/camera/contour/start`).catch(() => {})
+      await axios.post(`${apiBaseUrl}/api/camera/multi-object/start`).catch(() => {})
+      isContourDetecting.value = true
+      success(`เริ่มตรวจจับ: ${machine?.name || machineId}`)
+    } else {
+      warning('ตั้งเป้าหมายแล้ว — กด Start Camera เพื่อเริ่มตรวจจับ')
+    }
   } catch (e) {
-    error('เริ่มตรวจจับไม่สำเร็จ: ' + (e.response?.data?.error || e.message))
-    selectedMachineId.value = ''
+    error('ตั้งเป้าหมายไม่สำเร็จ: ' + (e.response?.data?.error || e.message))
+    await stopMeasurementWeb()
   }
 }
 
