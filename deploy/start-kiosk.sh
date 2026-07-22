@@ -20,14 +20,20 @@ if command -v xset >/dev/null 2>&1; then
   xset s noblank || true
 fi
 
-# 3) Find an available Chromium/Chrome binary
+# 3) Find an available browser. Chromium/Chrome first (their kiosk mode hides
+#    every control), Firefox as a fallback since it ships on most desktops.
 BROWSER=""
-for b in chromium-browser chromium google-chrome google-chrome-stable; do
+for b in chromium-browser chromium google-chrome google-chrome-stable firefox; do
   if command -v "$b" >/dev/null 2>&1; then BROWSER="$b"; break; fi
 done
 if [ -z "$BROWSER" ]; then
-  echo "[kiosk] No Chromium/Chrome found. Install with: sudo apt install -y chromium-browser" >&2
+  echo "[kiosk] No browser found. Install one with: sudo apt install -y chromium-browser" >&2
   exit 1
+fi
+
+# Firefox takes the URL directly and has no --app equivalent.
+if [ "$BROWSER" = "firefox" ]; then
+  exec firefox --kiosk "$URL"
 fi
 
 # 4) Launch in kiosk mode. Flags suppress the 'restore pages' / info bars so it
