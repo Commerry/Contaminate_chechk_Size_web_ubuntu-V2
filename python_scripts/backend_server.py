@@ -5,6 +5,7 @@ This file provides REST API endpoints for the Vue.js frontend
 """
 
 import os
+import signal
 import sys
 
 # A PoE camera closes the XLink connection when the host stops servicing it for
@@ -251,6 +252,13 @@ emitter_thread = None
 # stream that was still fine.
 CAMERA_FRAME_GRACE = 12.0
 
+# Every camera loop carries the generation it was started with. Re-initializing
+# bumps the counter, so an older loop that is no longer tracked by
+# `camera_thread` retires itself instead of draining the same queues in
+# parallel - duplicate loops are what left a stale thread handle behind and
+# made the watchdog reconnect a perfectly healthy camera.
+camera_loop_generation = 0
+
 # ✅ Request throttling - ป้องกัน request ซ้ำเร็วเกินไป
 last_measurement_request_time = 0
 measurement_request_cooldown = 0.5  # ต้องห่างกัน 0.5 วินาที (2 FPS max)
@@ -283,7 +291,7 @@ def get_object_color(object_index):
     ]
     return colors[object_index % len(colors)]
 
-def camera_loop():
+def camera_loop(generation=0):
     """Background thread for camera processing (supports LAN/PoE cameras) - runs continuously"""
     global latest_frame, latest_depth, running, oak_device, oak_pipeline, camera_active, last_frame_time
     
@@ -315,7 +323,7 @@ def camera_loop():
     print(f"[CAMERA LOOP] Frame skip rate: {frame_skip_rate} (sending every {frame_skip_rate + 1} frames = ~5 FPS for smooth experience)")
     print(f"[CAMERA LOOP] Recovery settings: max_errors={max_consecutive_errors}, timeout={max_time_without_frame}s, grace={grace_period}s")
     
-    while running:
+    while running and generation == camera_loop_generation:
         try:
             # === HEALTH CHECK (ลดความถี่เพื่อไม่รบกวนกล้อง) ===
             current_time = time.time()
@@ -717,7 +725,7 @@ def camera_loop():
             
             time.sleep(0.2)  # Brief wait on error
     
-    print("[CAMERA LOOP] Exiting camera loop thread")
+    print(f"[CAMERA LOOP] Exiting camera loop thread (generation {generation})")
 
 def initialize_oak_camera():
     """Initialize Luxonis OAK camera"""
@@ -1030,9 +1038,12 @@ def initialize_oak_camera():
             if camera_thread is threading.current_thread():
                 print("    Re-init from within camera loop - reusing current thread")
             else:
-                camera_thread = threading.Thread(target=camera_loop, daemon=True)
+                global camera_loop_generation
+                camera_loop_generation += 1
+                camera_thread = threading.Thread(
+                    target=camera_loop, args=(camera_loop_generation,), daemon=True)
                 camera_thread.start()
-                print("    Camera thread started")
+                print(f"    Camera thread started (generation {camera_loop_generation})")
         else:
             print("    Camera thread already running - reusing it")
         
@@ -6038,6 +6049,22 @@ if __name__ == '__main__':
     # 📡 Publish frames off the camera thread so a slow client cannot stall it.
     emitter_thread = threading.Thread(target=frame_emitter, daemon=True, name='frame-emitter')
     emitter_thread.start()
+
+    # A PoE camera keeps its session for ~45s when the host disappears without
+    # closing it, so every `systemctl restart` was followed by a minute of
+    # X_LINK connect failures. Hand the device back on the way out.
+    def _shutdown(signum, _frame):
+        global camera_should_run
+        print(f"[SHUTDOWN] Signal {signum} - releasing camera before exit")
+        camera_should_run = False
+        try:
+            stop_oak_camera(user_initiated=True)
+        except Exception as e:
+            print(f"[SHUTDOWN] Camera release failed: {e}")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
 
     if HAS_DEPTHAI:
         watchdog_thread = threading.Thread(target=camera_watchdog, daemon=True)
