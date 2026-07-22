@@ -2174,6 +2174,59 @@ def clear_detection_memory():
     _detection_memory = []
 
 
+def merge_overlapping_boxes(objects, gap=3):
+    """Fuse boxes that overlap or nearly touch into one box per physical piece.
+
+    A crumb is not a flat blob: crevices and internal shadows split its mask
+    into fragments, so one lump came back as a handful of boxes, several of them
+    nested inside a larger one. NMS cannot clean that up - a small box sitting
+    inside a big one has a low IoU against their union - so overlapping boxes
+    are combined into their bounding union instead.
+    """
+    if len(objects) < 2:
+        return objects
+
+    remaining = [dict(obj) for obj in objects]
+
+    fused = True
+    while fused:
+        fused = False
+        for i in range(len(remaining)):
+            if remaining[i] is None:
+                continue
+            for j in range(i + 1, len(remaining)):
+                if remaining[j] is None:
+                    continue
+
+                ax, ay, aw, ah = remaining[i]['bbox']
+                bx, by, bw, bh = remaining[j]['bbox']
+                touching = (ax - gap < bx + bw and bx - gap < ax + aw and
+                            ay - gap < by + bh and by - gap < ay + ah)
+                if not touching:
+                    continue
+
+                x1 = min(ax, bx)
+                y1 = min(ay, by)
+                x2 = max(ax + aw, bx + bw)
+                y2 = max(ay + ah, by + bh)
+
+                winner = remaining[i] if remaining[i]['score'] >= remaining[j]['score'] else remaining[j]
+                winner = dict(winner)
+                winner['bbox'] = [x1, y1, x2 - x1, y2 - y1]
+                winner['width_mm'] = (x2 - x1) * current_settings['calibration_width']
+                winner['height_mm'] = (y2 - y1) * current_settings['calibration_height']
+                winner['score'] = max(remaining[i]['score'], remaining[j]['score'])
+
+                remaining[i] = winner
+                remaining[j] = None
+                fused = True
+
+    merged = [obj for obj in remaining if obj is not None]
+    for idx, obj in enumerate(merged):
+        obj['label'] = f'Object_{idx + 1}'
+    return merged
+
+
 def merge_with_recent_detections(objects):
     """Add back objects seen in the last few frames but missed in this one."""
     global _detection_memory
@@ -2259,11 +2312,12 @@ def detect_by_contour(frame, depth):
         combined_mask = cv2.bitwise_or(binary_dark, binary_deviation)
         
         # === STEP 6: Morphology - เชื่อมวัตถุที่เป็นชิ้นเดียวกัน ===
-        # ✅ เพิ่ม kernel size และ iterations เพื่อเชื่อมส่วนของวัตถุเดียวกันให้ดีขึ้น
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))  # เพิ่มจาก 3x3 → 5x5
+        # Crevices and internal shadows cut a single lump into fragments, so the
+        # gaps to bridge are wider than the previous 5x5 kernel could reach.
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
         kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        
-        # CLOSE: เชื่อมช่องว่างเล็กๆ ภายในวัตถุ (เพิ่ม iterations 1→3)
+
+        # CLOSE: เชื่อมช่องว่างภายในวัตถุ
         binary_morphed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close, iterations=3)
         # OPEN: ลบ noise เล็กๆ (ลด iterations 2→1)
         binary_morphed = cv2.morphologyEx(binary_morphed, cv2.MORPH_OPEN, kernel_open, iterations=1)
@@ -2444,7 +2498,13 @@ def detect_by_contour(frame, depth):
                         filtered_objects.append(obj1)
                 
                 objects = filtered_objects
-            
+
+            # ✅ รวมกรอบที่ทับ/ติดกันให้เหลือกรอบเดียวต่อวัตถุจริง 1 ชิ้น
+            before_merge = len(objects)
+            objects = merge_overlapping_boxes(objects)
+            if len(objects) < before_merge:
+                print(f"[MERGE] Fused {before_merge} boxes into {len(objects)} object(s)")
+
             # ⭐ กรองตาม area หลัง NMS - รับวัตถุเล็กที่มีขนาดเพียงพอ
             min_bbox_area = 50   # ✅ ลดเป็น 50 เพื่อรองรับวัตถุเล็กถึง 3x3mm
             objects = [obj for obj in objects if (obj['bbox'][2] * obj['bbox'][3]) > min_bbox_area]
@@ -2563,7 +2623,10 @@ def detect_by_contour(frame, depth):
                         # cv2.putText(frame, label, (x+5, y-5), 
                         #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 
-                objects = merge_with_recent_detections(selected_objects)[:max_objects]
+                # Remembered boxes are merged too, otherwise a fragment recalled
+                # from an earlier frame reappears nested inside a fused box.
+                objects = merge_overlapping_boxes(
+                    merge_with_recent_detections(selected_objects))[:max_objects]
                 if len(objects) > len(selected_objects):
                     print(f"[MULTI MODE] Restored {len(objects) - len(selected_objects)} object(s) missed in this frame")
                 selected_objects = objects
