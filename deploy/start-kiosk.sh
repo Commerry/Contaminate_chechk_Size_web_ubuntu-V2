@@ -31,9 +31,11 @@ if [ -z "$BROWSER" ]; then
   exit 1
 fi
 
-# Firefox takes the URL directly and has no --app equivalent.
+# Firefox takes the URL directly and has no --app equivalent. It also hands the
+# URL to an already-running instance and exits, which silently skips kiosk mode,
+# so give the kiosk window its own profile and keep it off the remote channel.
 if [ "$BROWSER" = "firefox" ]; then
-  exec firefox --kiosk "$URL"
+  exec firefox --kiosk --no-remote --profile "${PSE_FF_PROFILE:-$HOME/.pse-kiosk-profile}" "$URL"
 fi
 
 # 4) Launch in kiosk mode. Flags suppress the 'restore pages' / info bars so it
