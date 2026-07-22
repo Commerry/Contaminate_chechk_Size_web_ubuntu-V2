@@ -2239,9 +2239,19 @@ def detect_by_contour(frame, depth):
             _, value_mask = cv2.threshold(v_channel, 240, 255, cv2.THRESH_BINARY_INV)
         hsv_combined = cv2.bitwise_and(saturation_mask, value_mask)
 
-        # === STEP 5: ใช้เฉพาะ binary_dark (Layer 4) ===
-        # ✅ ไม่รวม edges และ HSV เพราะ dark ดีที่สุดแล้ว
-        combined_mask = binary_dark.copy()
+        # === STEP 4.5: Background deviation (catches both polarities) ===
+        # The fixed threshold only sees one direction - "black rubber" mode needs
+        # gray < 65, so a pale crumb lying on a grey tray, obvious to the eye,
+        # produced no contour at all. Measure how far each pixel sits from the
+        # background level instead: anything standing out either way is an object.
+        background_level = int(np.median(blurred))
+        deviation = cv2.absdiff(blurred, np.full_like(blurred, background_level))
+        background_noise = float(np.median(deviation))
+        deviation_cut = max(18.0, background_noise * 4.0)
+        _, binary_deviation = cv2.threshold(deviation, deviation_cut, 255, cv2.THRESH_BINARY)
+
+        # === STEP 5: รวม threshold ตายตัวกับ deviation ===
+        combined_mask = cv2.bitwise_or(binary_dark, binary_deviation)
         
         # === STEP 6: Morphology - เชื่อมวัตถุที่เป็นชิ้นเดียวกัน ===
         # ✅ เพิ่ม kernel size และ iterations เพื่อเชื่อมส่วนของวัตถุเดียวกันให้ดีขึ้น
@@ -2269,7 +2279,7 @@ def detect_by_contour(frame, depth):
             layer2 = cv2.resize(cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR), (240, 180))  # Blurred
             layer3 = cv2.resize(cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR), (240, 180))  # Edges
             layer4 = cv2.resize(cv2.applyColorMap(binary_dark, cv2.COLORMAP_HOT), (240, 180))  # Dark
-            layer5 = cv2.resize(cv2.applyColorMap(hsv_combined, cv2.COLORMAP_HOT), (240, 180))  # HSV
+            layer5 = cv2.resize(cv2.applyColorMap(binary_deviation, cv2.COLORMAP_HOT), (240, 180))  # Deviation
             layer6 = cv2.resize(cv2.applyColorMap(combined_mask, cv2.COLORMAP_HOT), (240, 180))  # Combined
             layer7 = cv2.resize(cv2.applyColorMap(binary_morphed, cv2.COLORMAP_HOT), (240, 180))  # Morphology
             
@@ -2281,6 +2291,7 @@ def detect_by_contour(frame, depth):
         
         # ⭐ Contour detection thresholds (optimized for small objects down to 3mm)
         min_area = 50   # Minimum contour area in pixels (≈3mm x 3mm)
+        max_area = frame_w * frame_h * 0.25  # Anything bigger is background
         min_size = 5    # Minimum width/height in pixels (≈3mm)
         # Stereo depth is unreliable on small dark crumbs - it drops to 0% valid
         # pixels on some frames for a piece the contour sees perfectly well, and
@@ -2312,6 +2323,13 @@ def detect_by_contour(frame, depth):
             if area < min_area:
                 if i < 5:
                     print(f"  [SKIP] Contour {i}: area={area:.0f}px < {min_area}px")
+                continue
+
+            # A blob covering a quarter of the frame is the tray, a shadow or a
+            # letterbox band - never a crumb.
+            if area > max_area:
+                if i < 5:
+                    print(f"  [SKIP] Contour {i}: area={area:.0f}px > {max_area:.0f}px (background)")
                 continue
             
             # ✅ ใช้ boundingRect โดยตรงกับ contour
@@ -2591,7 +2609,7 @@ def detect_by_contour(frame, depth):
             cv2.putText(multi_layer_vis, "2.Blur", (250, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             cv2.putText(multi_layer_vis, "3.Edges", (490, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             cv2.putText(multi_layer_vis, "4.Dark", (730, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            cv2.putText(multi_layer_vis, "5.HSV", (10, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            cv2.putText(multi_layer_vis, "5.Deviation", (10, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             cv2.putText(multi_layer_vis, "6.Combined", (250, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             cv2.putText(multi_layer_vis, "7.Morph", (490, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             cv2.putText(multi_layer_vis, "8.Contours", (730, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
