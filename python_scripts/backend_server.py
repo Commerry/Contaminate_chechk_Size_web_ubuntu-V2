@@ -1159,6 +1159,7 @@ def stop_oak_camera(user_initiated=False):
         # Step 6: Reset tracking
         tracked_objects = {}
         next_object_id = 1
+        clear_detection_memory()
         
         print(" ✅ OAK camera stopped successfully")
         try:
@@ -2159,6 +2160,42 @@ def apply_nms(objects, iou_threshold=0.4):
     
     return [objects[i] for i in keep]
 
+# Contour thresholds sit right at the edge for small crumbs, so a piece found in
+# one frame can be missed in the next and its box blinks. Remember what was
+# detected recently and re-emit anything the current frame lost, so every piece
+# stays boxed at the same time instead of taking turns.
+DETECTION_MEMORY_FRAMES = 6
+_detection_memory = []  # [{'obj': detection, 'ttl': frames_remaining}]
+
+
+def clear_detection_memory():
+    """Forget remembered detections (camera/contour stopped, scene changed)."""
+    global _detection_memory
+    _detection_memory = []
+
+
+def merge_with_recent_detections(objects):
+    """Add back objects seen in the last few frames but missed in this one."""
+    global _detection_memory
+
+    merged = list(objects)
+    remembered = []
+
+    for entry in _detection_memory:
+        if any(calculate_iou(entry['obj']['bbox'], obj['bbox']) > 0.2 for obj in objects):
+            continue  # found again this frame - the fresh detection wins
+        entry['ttl'] -= 1
+        if entry['ttl'] > 0:
+            merged.append(entry['obj'])
+            remembered.append(entry)
+
+    for obj in objects:
+        remembered.append({'obj': obj, 'ttl': DETECTION_MEMORY_FRAMES})
+
+    _detection_memory = remembered
+    return merged
+
+
 def detect_by_contour(frame, depth):
     """ตรวจจับด้วย Contour (แยกพื้นหลังสีขาว) - พร้อม 8-layer visualization"""
     global latest_contour_mask, three_zone_detection_active
@@ -2245,7 +2282,11 @@ def detect_by_contour(frame, depth):
         # ⭐ Contour detection thresholds (optimized for small objects down to 3mm)
         min_area = 50   # Minimum contour area in pixels (≈3mm x 3mm)
         min_size = 5    # Minimum width/height in pixels (≈3mm)
-        min_depth_ratio = 0.01  # Minimum valid depth ratio
+        # Stereo depth is unreliable on small dark crumbs - it drops to 0% valid
+        # pixels on some frames for a piece the contour sees perfectly well, and
+        # the piece would blink out. Size comes from the pixel calibration, not
+        # from depth, so depth no longer decides whether an object exists.
+        min_depth_ratio = 0.0
         print(f"[CONTOUR] Using thresholds: min_area={min_area}px, min_size={min_size}x{min_size}px")
         
         # ✅ DEBUG: Log total contours found
@@ -2295,22 +2336,21 @@ def detect_by_contour(frame, depth):
             
             valid_depth_ratio = len(valid_depth) / (w * h) if (w * h) > 0 else 0
             
-            # Filter by valid depth ratio
-            if valid_depth_ratio < min_depth_ratio:
+            # Filter by valid depth ratio (disabled by default, see min_depth_ratio)
+            if min_depth_ratio > 0 and valid_depth_ratio < min_depth_ratio:
                 if i < 5:
                     print(f"  [SKIP] Contour {i}: not enough valid depth {valid_depth_ratio*100:.1f}% < {min_depth_ratio*100:.1f}%")
                 continue
-            
+
             avg_depth = float(np.median(valid_depth)) if len(valid_depth) > 10 else 0
-            
+
             # ✅ ใช้ calibration factor ที่ calibrated มาแล้ว (ไม่ใช้ focal_length)
-            if avg_depth > 0:
-                width_mm = w * current_settings['calibration_width']
-                height_mm = h * current_settings['calibration_height']
-                print(f"  [PASS] Contour {i}: area={area:.0f}px, bbox={w}x{h}px, size={width_mm:.1f}x{height_mm:.1f}mm")
-            else:
-                width_mm = 0
-                height_mm = 0
+            # Depth is reported for information only - it must not gate the size,
+            # otherwise a frame with no usable depth reports 0mm and the object
+            # is thrown away by the size filter further down.
+            width_mm = w * current_settings['calibration_width']
+            height_mm = h * current_settings['calibration_height']
+            print(f"  [PASS] Contour {i}: area={area:.0f}px, bbox={w}x{h}px, size={width_mm:.1f}x{height_mm:.1f}mm")
             
             # คำนวณ Score
             area_score = (area / 10000) * 0.6
@@ -2491,7 +2531,10 @@ def detect_by_contour(frame, depth):
                         # cv2.putText(frame, label, (x+5, y-5), 
                         #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 
-                objects = selected_objects
+                objects = merge_with_recent_detections(selected_objects)[:max_objects]
+                if len(objects) > len(selected_objects):
+                    print(f"[MULTI MODE] Restored {len(objects) - len(selected_objects)} object(s) missed in this frame")
+                selected_objects = objects
                 print(f"[CONTOUR MULTI] ✅ Selected {len(selected_objects)} objects (top {len(selected_objects)} by score)")
                 for idx, obj in enumerate(selected_objects):
                     x, y, w, h = obj['bbox']
@@ -3230,7 +3273,8 @@ def stop_contour_detection():
     global contour_detection_active, latest_contour_mask
     try:
         contour_detection_active = False
-        
+        clear_detection_memory()
+
         # Clear contour mask
         with frame_lock:
             latest_contour_mask = None
