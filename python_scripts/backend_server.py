@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Flask Backend API for OAK Camera Object Measurement System
 This file provides REST API endpoints for the Vue.js frontend
