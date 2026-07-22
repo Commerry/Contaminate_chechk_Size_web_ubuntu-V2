@@ -2244,11 +2244,16 @@ def detect_by_contour(frame, depth):
         # gray < 65, so a pale crumb lying on a grey tray, obvious to the eye,
         # produced no contour at all. Measure how far each pixel sits from the
         # background level instead: anything standing out either way is an object.
-        background_level = int(np.median(blurred))
-        deviation = cv2.absdiff(blurred, np.full_like(blurred, background_level))
-        background_noise = float(np.median(deviation))
+        background = np.full_like(blurred, int(np.median(blurred)))
+        background_noise = float(np.median(cv2.absdiff(blurred, background)))
         deviation_cut = max(18.0, background_noise * 4.0)
-        _, binary_deviation = cv2.threshold(deviation, deviation_cut, 255, cv2.THRESH_BINARY)
+        # Brighter than the tray only. A shadow darkens the tray by a little,
+        # which is exactly what a two-sided mask picks up - that is how two
+        # shadows turned nine crumbs into eleven detections. Genuinely dark
+        # rubber is still caught by the absolute threshold above, which a
+        # shadow never reaches.
+        brighter_than_background = cv2.subtract(blurred, background)
+        _, binary_deviation = cv2.threshold(brighter_than_background, deviation_cut, 255, cv2.THRESH_BINARY)
 
         # === STEP 5: รวม threshold ตายตัวกับ deviation ===
         combined_mask = cv2.bitwise_or(binary_dark, binary_deviation)
@@ -2346,6 +2351,15 @@ def detect_by_contour(frame, depth):
             if aspect_ratio < 0.05 or aspect_ratio > 20:
                 if i < 5:
                     print(f"  [SKIP] Contour {i}: bad aspect ratio {aspect_ratio:.2f}")
+                continue
+
+            # A crumb is a compact lump; a shadow or a smear spreads out and
+            # fills only part of its own convex hull.
+            hull_area = cv2.contourArea(cv2.convexHull(contour))
+            solidity = area / hull_area if hull_area > 0 else 0
+            if solidity < 0.45:
+                if i < 5:
+                    print(f"  [SKIP] Contour {i}: diffuse shape, solidity {solidity:.2f} < 0.45")
                 continue
             
             # === Valid Depth Check ===
