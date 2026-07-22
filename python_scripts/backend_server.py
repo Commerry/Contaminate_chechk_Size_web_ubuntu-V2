@@ -245,6 +245,12 @@ pending_frame_payload = None
 frame_emit_event = threading.Event()
 emitter_thread = None
 
+# How long frames may be missing before the camera counts as broken. As long as
+# frames keep arriving the camera is by definition working, so nothing may
+# reopen it - a second open of a live device fails with X_LINK and kills the
+# stream that was still fine.
+CAMERA_FRAME_GRACE = 12.0
+
 # ✅ Request throttling - ป้องกัน request ซ้ำเร็วเกินไป
 last_measurement_request_time = 0
 measurement_request_cooldown = 0.5  # ต้องห่างกัน 0.5 วินาที (2 FPS max)
@@ -419,6 +425,12 @@ def camera_loop():
                 if got_frame:
                     consecutive_errors = 0  # Reset on success
                     recovery_attempts = 0  # Reset recovery counter
+                    # A frame is proof the camera works. A failed reconnect
+                    # attempt may have cleared the flag while this loop kept
+                    # streaming; don't leave the API rejecting requests for a
+                    # camera that is plainly running.
+                    if not camera_active and camera_should_run:
+                        camera_active = True
                     if should_process:  # นับเฉพาะเฟรมที่ส่งจริง
                         frame_count += 1
                         
@@ -1056,7 +1068,8 @@ def initialize_oak_camera():
         traceback.print_exc()
         print("=" * 60)
         camera_active = False
-        running = False
+        # Deliberately NOT clearing `running`: a failed (re)connect must not stop
+        # a camera loop that is still delivering frames from the live device.
         if oak_device:
             try:
                 oak_device.close()
@@ -2808,12 +2821,14 @@ def ensure_camera_recovery(reason="unknown", blocking=False):
     if not HAS_DEPTHAI or not camera_should_run:
         return False
 
-    # Only hard failures need a full re-init here (thread died / device gone).
-    # A transient frame gap is handled inside camera_loop, so we do NOT reinit on
-    # stale-frames alone - that would drop a working stream and cause flicker.
-    is_connected, thread_alive, _, _, _ = _camera_health()
-    healthy = is_connected and thread_alive
-    if healthy:
+    # Fresh frames prove the camera works, whatever the other signals say. The
+    # thread handle in particular goes stale after a reconnect while the loop
+    # keeps running, and acting on it reopened a device that was streaming fine
+    # - the second open failed with X_LINK and took the healthy stream with it.
+    is_connected, thread_alive, has_frames, _, time_since_frame = _camera_health()
+    if has_frames and time_since_frame < CAMERA_FRAME_GRACE:
+        return False
+    if is_connected and thread_alive:
         return False
 
     # Non-blocking: if a recovery is already running, let it finish.
@@ -2823,7 +2838,9 @@ def ensure_camera_recovery(reason="unknown", blocking=False):
     try:
         recovery_in_progress = True
         # Re-check under the lock (another thread may have just fixed it).
-        is_connected, thread_alive, _, _, _ = _camera_health()
+        is_connected, thread_alive, has_frames, _, time_since_frame = _camera_health()
+        if has_frames and time_since_frame < CAMERA_FRAME_GRACE:
+            return False
         if is_connected and thread_alive:
             return False
         print(f"[AUTO-RECOVERY] ♻️ Reconnecting camera (reason={reason})...")
@@ -2896,6 +2913,9 @@ def camera_watchdog():
             if not camera_should_run or not HAS_DEPTHAI:
                 continue
             is_connected, thread_alive, has_frames, frames_fresh, tsf = _camera_health()
+            # Frames still coming in? Then the camera is fine - never touch it.
+            if has_frames and tsf < CAMERA_FRAME_GRACE:
+                continue
             # Recover only on hard failures; let camera_loop ride out brief gaps.
             if (not thread_alive) or (not is_connected):
                 reason = "thread_died" if not thread_alive else "device_down"
