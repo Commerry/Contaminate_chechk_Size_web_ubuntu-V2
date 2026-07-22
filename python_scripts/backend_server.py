@@ -2299,14 +2299,27 @@ def detect_by_contour(frame, depth):
         # background level instead: anything standing out either way is an object.
         background = np.full_like(blurred, int(np.median(blurred)))
         background_noise = float(np.median(cv2.absdiff(blurred, background)))
-        deviation_cut = max(18.0, background_noise * 4.0)
         # Brighter than the tray only. A shadow darkens the tray by a little,
         # which is exactly what a two-sided mask picks up - that is how two
         # shadows turned nine crumbs into eleven detections. Genuinely dark
         # rubber is still caught by the absolute threshold above, which a
         # shadow never reaches.
         brighter_than_background = cv2.subtract(blurred, background)
-        _, binary_deviation = cv2.threshold(brighter_than_background, deviation_cut, 255, cv2.THRESH_BINARY)
+
+        # Hysteresis. A single high cut only keeps the bright core of a lump, so
+        # the box stopped well short of the piece and the reported size came out
+        # too small. Take the core as a seed, then grow the mask over the dimmer
+        # pixels connected to it. Both cuts stay on the bright side, so growing
+        # the mask never reaches into the shadow beside the piece.
+        strong_cut = max(18.0, background_noise * 4.0)
+        weak_cut = max(8.0, background_noise * 1.5)
+        _, mask_core = cv2.threshold(brighter_than_background, strong_cut, 255, cv2.THRESH_BINARY)
+        _, mask_faint = cv2.threshold(brighter_than_background, weak_cut, 255, cv2.THRESH_BINARY)
+
+        _, faint_labels = cv2.connectedComponents(mask_faint)
+        seeded_labels = np.unique(faint_labels[mask_core > 0])
+        seeded_labels = seeded_labels[seeded_labels != 0]
+        binary_deviation = np.where(np.isin(faint_labels, seeded_labels), 255, 0).astype(np.uint8)
 
         # === STEP 5: รวม threshold ตายตัวกับ deviation ===
         combined_mask = cv2.bitwise_or(binary_dark, binary_deviation)
