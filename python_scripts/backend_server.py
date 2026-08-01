@@ -2321,6 +2321,15 @@ def detect_by_contour(frame, depth):
         seeded_labels = seeded_labels[seeded_labels != 0]
         binary_deviation = np.where(np.isin(faint_labels, seeded_labels), 255, 0).astype(np.uint8)
 
+        # === STEP 4.6: Drop specular glints ===
+        # A light reflection off the metal tray is a tiny, blown-out white point:
+        # value pinned near 255 with almost no colour. Rubber - even pale rubber -
+        # reflects diffusely and never saturates like that. Punch those pixels out
+        # of the deviation mask so a glint cannot seed a detection.
+        specular = ((v_channel >= 248) & (s_channel <= 30)).astype(np.uint8) * 255
+        specular = cv2.dilate(specular, np.ones((3, 3), np.uint8), iterations=1)
+        binary_deviation = cv2.bitwise_and(binary_deviation, cv2.bitwise_not(specular))
+
         # === STEP 5: รวม threshold ตายตัวกับ deviation ===
         combined_mask = cv2.bitwise_or(binary_dark, binary_deviation)
         
@@ -2427,6 +2436,17 @@ def detect_by_contour(frame, depth):
             if solidity < 0.45:
                 if i < 5:
                     print(f"  [SKIP] Contour {i}: diffuse shape, solidity {solidity:.2f} < 0.45")
+                continue
+
+            # Glint rejection. A small, blown-out white blob is a reflection off
+            # the tray, not a crumb: rubber never saturates the sensor the way a
+            # specular point does. Only small blobs are judged so a genuinely
+            # bright but sizeable piece is never thrown away.
+            roi_gray = gray[y:y+h, x:x+w]
+            median_bright = float(np.median(roi_gray)) if roi_gray.size else 0
+            if area < 400 and median_bright >= 235:
+                if i < 5:
+                    print(f"  [SKIP] Contour {i}: glint (area={area:.0f}px, brightness={median_bright:.0f})")
                 continue
             
             # === Valid Depth Check ===
