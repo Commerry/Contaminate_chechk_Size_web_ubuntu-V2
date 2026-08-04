@@ -210,8 +210,13 @@ except Exception as _depthai_err:
     HAS_DEPTHAI = False
     print(f"[Startup] ⚠️ depthai not available ({_depthai_err}); running without OAK camera support")
 from python_scripts.camera_lock import acquire_lock, release_lock
+from python_scripts.cameras import registry as camera_registry
 import threading
 import time
+
+# Active camera backend (Luxonis / Hikvision / Basler). The rest of the app
+# talks to the camera only through this - see python_scripts/cameras/.
+active_backend = None
 
 oak_pipeline = None
 oak_device = None
@@ -353,52 +358,30 @@ def camera_loop(generation=0):
                 # ไม่ตรวจสอบ isClosed() บ่อยๆ เพราะอาจรบกวน LAN connection
                 # ให้ยึดตาม frame acquisition แทน
             
-            # === FRAME ACQUISITION ===
-            if oak_device and not oak_device.isClosed():
-                # ✅ Refresh output queues only when device changes (cache to avoid per-frame overhead)
-                if oak_device != cached_device_for_queues:
-                    try:
-                        queue_rgb = oak_device.getOutputQueue(name="rgb", maxSize=1, blocking=False)
-                        cached_device_for_queues = oak_device
-                        print("[CAMERA] ✅ Output queue initialized/refreshed")
-                    except Exception as qe:
-                        print(f"[CAMERA] ⚠️ Failed to init queue: {qe}")
-                        queue_rgb = None
-
-                if queue_rgb is None:
-                    time.sleep(0.5)
-                    continue
-
-                # Get RGB frame with maxSize=1 to prevent buffer buildup
-                in_rgb = queue_rgb.tryGet()
-
-                # ✅ Clear old frames from queue to prevent lag
-                try:
-                    while queue_rgb.has():
-                        queue_rgb.tryGet()  # ดึงและทิ้ง
-                except:
-                    pass
+            # === FRAME ACQUISITION (via active backend) ===
+            backend = active_backend
+            if backend is not None and backend.is_connected():
+                # Read the newest BGR frame from whatever camera is active
+                # (Luxonis / Hikvision / Basler). Backend read() is latest-wins.
+                frame = backend.read()
 
                 got_frame = False
-                
+
                 # ✅ Frame Skipping - ลด network load
                 frame_skip_counter += 1
                 should_process = (frame_skip_counter % (frame_skip_rate + 1) == 0)
-                
-                if in_rgb is not None:
+
+                if frame is not None:
                     try:
-                        frame = in_rgb.getCvFrame()
                         # อัพเดท frame เฉพาะเมื่อควร process
                         if should_process:
                             # ✅ ลดความละเอียดลง 60% ก่อนเก็บเพื่อลด memory และ bandwidth
                             h, w = frame.shape[:2]
                             frame_resized = cv2.resize(frame, (int(w * 0.6), int(h * 0.6)), interpolation=cv2.INTER_AREA)
                             with frame_lock:
-                                # ✅ ลบ frame เก่าก่อนเก็บ frame ใหม่เพื่อ free memory
                                 if latest_frame is not None:
                                     del latest_frame
                                 latest_frame = frame_resized.copy()
-                        # ✅ ลบ frame ชั่วคราวเพื่อ free memory
                         del frame
                         got_frame = True
                     except Exception as e:
@@ -700,13 +683,11 @@ def camera_loop(generation=0):
     print(f"[CAMERA LOOP] Exiting camera loop thread (generation {generation})")
 
 def initialize_oak_camera():
-    """Initialize Luxonis OAK camera"""
-    global oak_pipeline, oak_device, camera_thread, running, camera_active
+    """Initialize the active camera via the selected backend."""
+    global oak_pipeline, oak_device, camera_thread, running, camera_active, active_backend
 
-    # No depthai on this host (e.g. a desktop without an OAK camera):
-    # skip cleanly instead of raising / spamming tracebacks.
-    if not HAS_DEPTHAI:
-        print("[CAMERA] depthai module not available - cannot initialize OAK camera on this host")
+    if not camera_registry.available_vendors():
+        print("[CAMERA] No camera SDK available on this host")
         camera_active = False
         return False
 
@@ -742,232 +723,53 @@ def initialize_oak_camera():
         except Exception as e:
             print(f"    Resource cleanup: {e}")
         
-        # Create pipeline
-        print("[STEP 3] Creating depthai pipeline...")
-        pipeline = dai.Pipeline()
-        # Luxonis' recommended setting for PoE: send data in one chunk instead of
-        # splitting it, which lowers latency and keeps the link busy less often.
-        try:
-            pipeline.setXLinkChunkSize(0)
-        except Exception as _e:
-            print(f"    (XLink chunk size not applied: {_e})")
-        
-        # Define source - RGB camera (ใช้ค่าคงที่เพื่อความเสถียร)
-        print("[STEP 4] Configuring RGB camera node...")
-        cam_rgb = pipeline.create(dai.node.ColorCamera)
-        
-        # ใช้ 720p เพื่อสมดุลระหว่างคุณภาพและ bandwidth (Sweet Spot!)
-        # 1280x720 = เหมาะสมสำหรับ detection ที่แม่นยำ + smooth + ประหยัด bandwidth
-        cam_rgb.setPreviewSize(1280, 720)
-        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_720_P)
-        cam_rgb.setInterleaved(False)
-        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-        
-        # ใช้ 15 FPS เพื่อความ smooth ที่ดีและประหยัดพอดี
-        fps = 15  # Sweet spot: smooth + efficient
-        cam_rgb.setFps(fps)
-        
-        # Apply zoom from config
-        # ⭐ ปิดการซูม - ตรึงไว้ที่ 1.0x เสมอ
-        zoom_level = 1.0  # ฟิกไว้ไม่ให้ซูม
-        print(f"[STEP 4] Zoom disabled (fixed at 1.0x)")
-        
-        # Auto Focus - ใช้ CONTINUOUS_VIDEO (เบากว่า CONTINUOUS_PICTURE)
-        if system_config.get('auto_focus', 1) == 1:
-            cam_rgb.initialControl.setAutoFocusMode(dai.CameraControl.AutoFocusMode.CONTINUOUS_VIDEO)
-        
-        # Auto White Balance from config
-        if system_config.get('auto_white_balance', 1) == 1:
-            cam_rgb.initialControl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.AUTO)
-        
-        # Auto Exposure from config
-        if system_config.get('auto_exposure', 1) == 1:
-            cam_rgb.initialControl.setAutoExposureEnable()
-            cam_rgb.initialControl.setAutoExposureLock(False)
-            cam_rgb.initialControl.setAutoExposureRegion(0, 0, 65535, 65535)
-        
-        # ISO Sensitivity (ความไวแสง) - Auto
-        # OAK-D รองรับ ISO 100-1600 (ยิ่งสูง ยิ่งไวแสง แต่มี noise มากขึ้น)
-        # cam_rgb.initialControl.setManualExposure(10000, 400)  # (exposure_us, iso_sensitivity)
-        # ปล่อย Auto = ให้กล้องปรับเอง
-        
-        # Brightness/Contrast (ถ้าต้องการปรับเพิ่ม)
-        # cam_rgb.initialControl.setBrightness(0)  # -10 to 10
-        # cam_rgb.initialControl.setContrast(0)     # -10 to 10
-        # cam_rgb.initialControl.setSaturation(0)   # -10 to 10
-        
-        print(f"    RGB camera configured: 1280x720 @ {fps}fps with Auto Focus + Auto Exposure (Balanced: Smooth + Efficient)")
+        # === Open the camera through the vendor-agnostic backend ===
+        print("[STEP 3] Selecting camera backend...")
+        vendor = (system_config.get('camera_vendor', '') or '').strip()
+        device_id = (system_config.get('camera_device_id', '') or '').strip() or None
+        if vendor:
+            backend = camera_registry.create_backend(vendor, system_config)
+        else:
+            backend = camera_registry.auto_backend(system_config)
+        if backend is None:
+            print("[CAMERA] No camera backend available on this host")
+            camera_active = False
+            try:
+                release_lock()
+            except Exception:
+                pass
+            return False
+        print(f"[STEP 3] Using backend: {backend.vendor}")
 
-        # Create RGB output stream (depth removed - sizing is pixel-calibration based)
-        print("[STEP 5] Creating output stream...")
-        xout_rgb = pipeline.create(dai.node.XLinkOut)
-        xout_rgb.setStreamName("rgb")
-        cam_rgb.preview.link(xout_rgb.input)
-        print("    Output stream created: rgb")
-
-        # Connect to OAK camera (Universal support for all Luxonis models)
-        # Auto-detect CSI/USB first, then Network if configured
-        # Supports: OAK-D-CM4 (CSI), OAK-D (USB), OAK-1-PoE (Network), etc.
-        print(f"[STEP 7] Connecting to OAK camera...")
-
-        # === Acquire cross-process camera lock ===
-        print("[STEP 7.0] Attempting to acquire cross-process camera lock (worker-aware)...")
+        # === Acquire cross-process camera lock (worker-aware) ===
         locked = acquire_lock(timeout=0.5)
         if not locked:
-            print("[STEP 7.0] Camera lock held by another process (worker). Skipping device init.")
+            print("[CAMERA] Camera lock held by another process. Skipping device init.")
             camera_active = False
             try:
                 release_lock()
             except Exception:
                 pass
             return False
-        else:
-            print("[STEP 7.0] Acquired camera lock - proceeding to open device")
 
-        # Build connection methods based on configuration
-        # If a network camera IP is configured, try it FIRST (fast) so we don't
-        # waste ~25s failing USB methods before reaching the PoE camera (and the
-        # USB scan can disturb the PoE camera, breaking the later Network attempt).
-        if network_camera_ip:
-            connection_methods = [
-                ('Network', network_camera_ip),
-                ('CSI/USB Auto-detect', 'auto'),
-            ]
-        else:
-            connection_methods = [
-                ('CSI/USB Auto-detect', 'auto'),
-                ('USB2 Fallback', 'usb2'),
-            ]
-
-        max_attempts_per_method = 3  # เพิ่มเป็น 3 attempts
-        connection_success = False
-        connection_delay = 2  # seconds between retries
-        connected_method = None
-        connected_method_name = None
-        
-        for method_name, method_config in connection_methods:
-            if connection_success:
-                break
-                
-            print(f"\n   Trying {method_name} connection...")
-            
-            for attempt in range(1, max_attempts_per_method + 1):
-                try:
-                    print(f"   Attempt {attempt}/{max_attempts_per_method}...", end=" ")
-                    
-                    if method_name == 'CSI/USB Auto-detect':
-                        # Auto-detect any local camera (CSI on Raspberry Pi or USB on any platform)
-                        # This works for: OAK-D-CM4, OAK-D, OAK-1, OAK-D-Lite, etc.
-                        oak_device = dai.Device(pipeline)
-                        
-                    elif method_name == 'USB2 Fallback':
-                        # Force USB 2.0 mode - more stable on some Windows/USB3 setups
-                        oak_device = dai.Device(pipeline, dai.UsbSpeed.HIGH)
-                        
-                    elif method_name == 'Network':
-                        # Connect to Network/PoE camera with specific IP
-                        # This works for: OAK-1-PoE, OAK-D-PoE, etc.
-                        device_info = dai.DeviceInfo(method_config)
-                        oak_device = dai.Device(pipeline, device_info)
-                    
-                    # Device created successfully
-                    oak_pipeline = pipeline
-                    connected_method = method_config if method_name == 'Network' else 'auto'
-                    connected_method_name = method_name
-                    print(f"✓ Connected!")
-                    connection_success = True
-                    break
-                    
-                except RuntimeError as e:
-                    error_msg = str(e)
-                    print(f"✗ Failed ({error_msg[:50]}...)")
-                    
-                    # If last attempt for this method, skip to next
-                    if attempt >= max_attempts_per_method:
-                        print(f"   → Skipping to next method...")
-                        break
-                    
-                    # Wait before retry
-                    time.sleep(connection_delay)
-                    
-                except Exception as e:
-                    print(f"✗ Error: {str(e)[:50]}")
-                    if attempt >= max_attempts_per_method:
-                        break
-                    time.sleep(connection_delay)
-        
-        # Check if any connection method succeeded
-        if not connection_success:
-            print(f"\n{'='*60}")
-            print(f" ❌ Cannot connect to OAK camera")
-            if network_camera_ip:
-                print(f"Tried: CSI/USB Auto-detect and Network ({network_camera_ip})")
-            else:
-                print(f"Tried: CSI/USB Auto-detect only (no network IP configured)")
-            print(f"{'='*60}")
-            print(f"\nPossible solutions:")
-            print(f"  For CSI camera (Raspberry Pi):")
-            print(f"    1. Check CSI ribbon cable connection (contacts facing correct way)")
-            print(f"    2. Ensure camera is enabled in raspi-config")
-            print(f"    3. Check: 'dmesg | grep imx' to see if sensor detected")
-            print(f"  For USB camera (Windows/Linux/Mac):")
-            print(f"    4. Check USB cable is properly connected (USB 3.0 port recommended)")
-            print(f"    5. Try different USB port or cable")
-            print(f"    6. Check: 'lsusb' (Linux) or Device Manager (Windows)")
-            if network_camera_ip:
-                print(f"  For Network/PoE camera:")
-                print(f"    7. Verify camera IP: {network_camera_ip}")
-                print(f"    8. Test connection: ping {network_camera_ip}")
-                print(f"    9. Ensure camera is on same network/subnet")
-                print(f"    10. Check PoE switch is providing power")
-            else:
-                print(f"  For Network/PoE camera:")
-                print(f"    7. Set 'network_camera_ip' in config (e.g., '192.168.1.100')")
-            print(f"  General:")
-            print(f"    - Restart the camera and try again")
-            print(f"    - Close other apps using the camera")
-            print(f"    - Check camera has power and LED is on")
-            print(f"{'='*60}\n")
+        opened = backend.open(device_id=device_id, config={'fps': 15})
+        if not opened:
+            print(f"[CAMERA] Backend '{backend.vendor}' failed to open a device")
             camera_active = False
-            # Release the camera lock so the next attempt / watchdog can retry.
             try:
                 release_lock()
             except Exception:
                 pass
             return False
-        
-        # Show connection details
-        try:
-            device_name = oak_device.getDeviceName()
-            mxid = oak_device.getMxId()
-            
-            # Determine connection type and icon
-            if connected_method_name == 'CSI/USB Auto-detect':
-                # Try to determine if CSI or USB
-                if 'CM4' in device_name.upper() or 'CSI' in device_name.upper():
-                    conn_type = "CSI Direct (Raspberry Pi)"
-                    conn_icon = "📷"
-                else:
-                    conn_type = "USB Direct"
-                    conn_icon = "🔌"
-            elif connected_method_name == 'Auto-discovered':
-                conn_type = "Auto-discovered Device (LAN/USB)"
-                conn_icon = "🌐"
-            else:
-                conn_type = f"Network/PoE ({connected_method})"
-                conn_icon = "🌐"
-            
-            print(f"\n{'='*60}")
-            print(f"   {conn_icon} Camera Connected Successfully!")
-            print(f"   Connection Type: {conn_type}")
-            print(f"   Device Model: {device_name}")
-            print(f"   Device ID: {mxid}")
-            print(f"   Compatible: All Luxonis OAK models ✓")
-            print(f"{'='*60}\n")
-        except Exception as e:
-            print(f"   ✓ Camera connected successfully via {method_name}")
-            print(f"   Connection method: {connected_method}\n")
-        
+
+        active_backend = backend
+        # Keep oak_device pointing at the raw depthai device (when the backend is
+        # Luxonis) so the existing isClosed()/health checks keep working. For
+        # non-depthai backends this is a truthy sentinel object.
+        oak_device = getattr(backend, 'device', None) or backend
+        oak_pipeline = None
+        print(f"[CAMERA] Connected: {backend.get_info()}")
+
         # Start camera thread (only if one isn't already running).
         # When called from the camera_loop recovery path, the loop thread is
         # still alive and just needs the freshly-opened device — starting a
@@ -1039,8 +841,8 @@ def stop_oak_camera(user_initiated=False):
     behind the user's back once the camera came back.
     """
     global oak_device, oak_pipeline, running, camera_thread, camera_active, latest_frame
-    global tracked_objects, next_object_id, contour_detection_active
-    
+    global tracked_objects, next_object_id, contour_detection_active, active_backend
+
     try:
         print(" [STOPPING] Stopping OAK camera...")
         
@@ -1068,24 +870,16 @@ def stop_oak_camera(user_initiated=False):
                 print("  Camera thread stopped")
             camera_thread = None
         
-        # Step 3: Close device with retry
-        if oak_device is not None:
-            for attempt in range(3):
-                try:
-                    if not oak_device.isClosed():
-                        print(f" Closing OAK device (attempt {attempt + 1}/3)...")
-                        oak_device.close()
-                        time.sleep(0.5)  # Longer delay for LAN camera
-                    print("  OAK device closed")
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        print(f" Close attempt {attempt + 1} failed: {e}, retrying...")
-                        time.sleep(0.5)
-                    else:
-                        print(f" ❌ Failed to close device after 3 attempts: {e}")
-            oak_device = None
-        
+        # Step 3: Close the backend (releases the underlying device)
+        if active_backend is not None:
+            try:
+                active_backend.close()
+                print("  Camera backend closed")
+            except Exception as e:
+                print(f" ❌ Failed to close backend: {e}")
+            active_backend = None
+        oak_device = None
+
         # Step 4: Clear pipeline
         oak_pipeline = None
         
@@ -2176,9 +1970,8 @@ def _camera_health():
 
     (is_connected, thread_alive, has_frames, frames_fresh, time_since_frame)
     """
-    dev = oak_device
     try:
-        is_connected = dev is not None and not dev.isClosed()
+        is_connected = active_backend is not None and active_backend.is_connected()
     except Exception:
         is_connected = False
     thread_alive = camera_thread.is_alive() if camera_thread else False
@@ -2409,6 +2202,48 @@ def list_cameras():
             'count': 0,
             'message': f'Error listing cameras: {str(e)}'
         }), 500
+
+@app.route('/api/cameras/scan', methods=['GET'])
+def scan_cameras():
+    """Discover connected cameras across every available vendor backend."""
+    try:
+        devices = camera_registry.scan_all()
+        return jsonify({
+            'success': True,
+            'vendors': camera_registry.available_vendors(),
+            'cameras': devices,
+            'count': len(devices),
+            'selected': {
+                'vendor': system_config.get('camera_vendor', '') or '',
+                'device_id': system_config.get('camera_device_id', '') or ''
+            }
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'cameras': [], 'count': 0, 'message': str(e)}), 500
+
+@app.route('/api/camera/select', methods=['POST'])
+def select_camera():
+    """Pin which camera (vendor + device id) the next connect should use.
+
+    Empty vendor = auto-select the first available backend/device.
+    """
+    try:
+        data = request.get_json() or {}
+        vendor = (data.get('vendor', '') or '').strip()
+        device_id = (data.get('device_id', '') or '').strip()
+        if vendor and vendor not in camera_registry.available_vendors():
+            return jsonify({'success': False,
+                            'message': f"Vendor '{vendor}' SDK not available on this host"}), 400
+        system_config.update({
+            'camera_vendor': vendor,
+            'camera_device_id': device_id
+        }, auto_save=True)
+        print(f"[CAMERA] Selected vendor='{vendor}' device_id='{device_id}'")
+        return jsonify({'success': True, 'vendor': vendor, 'device_id': device_id})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/camera/contour/start', methods=['POST'])
 def start_contour_detection():
@@ -5185,7 +5020,6 @@ if __name__ == '__main__':
     camera_active = False
     oak_device = None
     latest_frame = None
-    latest_depth = None
     running = False
     
     # Get port from environment variable or default to 64021
