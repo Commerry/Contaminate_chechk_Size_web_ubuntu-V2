@@ -1990,7 +1990,7 @@ def ensure_camera_recovery(reason="unknown", blocking=False):
     """
     global recovery_in_progress
 
-    if not HAS_DEPTHAI or not camera_should_run:
+    if not camera_registry.available_vendors() or not camera_should_run:
         return False
 
     # Fresh frames prove the camera works, whatever the other signals say. The
@@ -2082,7 +2082,7 @@ def camera_watchdog():
     while True:
         try:
             time.sleep(5)
-            if not camera_should_run or not HAS_DEPTHAI:
+            if not camera_should_run or not camera_registry.available_vendors():
                 continue
             is_connected, thread_alive, has_frames, frames_fresh, tsf = _camera_health()
             # Frames still coming in? Then the camera is fine - never touch it.
@@ -5101,11 +5101,11 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    if HAS_DEPTHAI:
+    if camera_registry.available_vendors():
         watchdog_thread = threading.Thread(target=camera_watchdog, daemon=True)
         watchdog_thread.start()
     else:
-        print("[WATCHDOG] depthai not available - watchdog idle (no OAK camera on this host)")
+        print("[WATCHDOG] no camera SDK available - watchdog idle")
     
     # Restore rubber type
     saved_rubber_type = system_config.get('rubber_type', 'black')
