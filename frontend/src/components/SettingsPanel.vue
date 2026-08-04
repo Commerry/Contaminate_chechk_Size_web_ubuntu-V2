@@ -15,64 +15,70 @@
       </div>
 
       <div class="settings-content">
-        <!-- Connected Cameras (Luxonis) -->
+        <!-- Camera Source (multi-vendor: Luxonis / Hikvision / Basler) -->
         <div class="settings-section">
           <h3 class="section-title">
             <IconSvg name="camera" :size="18" class="section-icon" />
-            Connected Cameras
+            Camera Source
           </h3>
-          
+
           <div class="camera-list">
+            <div class="camera-source-toolbar">
+              <span class="camera-vendors">
+                SDK: {{ availableVendors.length ? availableVendors.join(', ') : 'none' }}
+              </span>
+              <button class="btn btn-secondary btn-sm" @click="scanCameras" :disabled="loadingCameras">
+                <IconSvg name="refresh" :size="14" />
+                {{ loadingCameras ? 'Scanning...' : 'Scan' }}
+              </button>
+            </div>
+
+            <!-- Auto-select option -->
+            <div
+              class="camera-item"
+              :class="{ 'active': selectedVendor === '' }"
+              @click="selectCamera('', '')"
+            >
+              <div class="camera-info">
+                <div class="camera-name">
+                  Auto-detect
+                  <span v-if="selectedVendor === ''" class="badge-active">Selected</span>
+                </div>
+                <div class="camera-details">
+                  <span class="camera-protocol">Pick the first camera found on connect</span>
+                </div>
+              </div>
+            </div>
+
             <div v-if="loadingCameras" class="loading-state">
               <div class="spinner"></div>
               <span>Scanning for cameras...</span>
             </div>
 
             <div v-else-if="cameras.length === 0" class="empty-state">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
-                <circle cx="12" cy="13" r="4"></circle>
-                <line x1="1" y1="1" x2="23" y2="23" stroke="red" stroke-width="2"></line>
-              </svg>
-              <p>No Luxonis cameras detected</p>
-              <button class="btn btn-sm" @click="refreshCameras">
-                <IconSvg name="refresh" :size="14" />
-                Refresh
-              </button>
+              <p>No cameras detected. Press Scan.</p>
             </div>
 
             <div v-else class="camera-items">
-              <div 
-                v-for="camera in cameras" 
-                :key="camera.mxid"
+              <div
+                v-for="cam in cameras"
+                :key="cam.vendor + ':' + cam.id"
                 class="camera-item"
-                :class="{ 'active': camera.mxid === currentDeviceId }"
+                :class="{ 'active': selectedVendor === cam.vendor && selectedDeviceId === String(cam.id) }"
+                @click="selectCamera(cam.vendor, cam.id)"
               >
-                <div class="camera-icon">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
-                    <circle cx="12" cy="13" r="4"></circle>
-                  </svg>
-                </div>
                 <div class="camera-info">
                   <div class="camera-name">
-                    {{ camera.name }}
-                    <span v-if="camera.mxid === currentDeviceId" class="badge-active">Active</span>
+                    {{ cam.name }}
+                    <span v-if="selectedVendor === cam.vendor && selectedDeviceId === String(cam.id)" class="badge-active">Selected</span>
                   </div>
                   <div class="camera-details">
-                    <span class="camera-id">{{ formatMxId(camera.mxid) }}</span>
-                    <span class="camera-protocol">{{ camera.protocol }}</span>
-                    <span class="camera-state" :class="'state-' + camera.state.toLowerCase()">
-                      {{ camera.state }}
-                    </span>
+                    <span class="camera-protocol">{{ cam.vendor }}</span>
+                    <span class="camera-id">{{ cam.serial || cam.id }}</span>
+                    <span v-if="cam.state" class="camera-state">{{ cam.state }}</span>
                   </div>
                 </div>
               </div>
-
-              <button class="btn btn-secondary btn-sm refresh-btn" @click="refreshCameras">
-                <IconSvg name="refresh" :size="14" />
-                Refresh List
-              </button>
             </div>
           </div>
         </div>
@@ -462,42 +468,52 @@ const localSettings = ref({
   ...props.settings
 })
 
-// Camera list management
+// Multi-vendor camera source management
 const cameras = ref([])
-const currentDeviceId = ref(null)
+const availableVendors = ref([])
+const selectedVendor = ref('')       // '' = auto-detect
+const selectedDeviceId = ref('')
 const loadingCameras = ref(false)
 
-const loadCameras = async () => {
+// Scan every vendor backend for connected cameras
+const scanCameras = async () => {
   loadingCameras.value = true
   try {
-    const response = await axios.get('/api/cameras/list')
+    const response = await axios.get('/api/cameras/scan')
     if (response.data.success) {
       cameras.value = response.data.cameras || []
-      currentDeviceId.value = response.data.current_device_id
-      console.log(`📹 Found ${cameras.value.length} camera(s)`, cameras.value)
+      availableVendors.value = response.data.vendors || []
+      const sel = response.data.selected || {}
+      selectedVendor.value = sel.vendor || ''
+      selectedDeviceId.value = sel.device_id || ''
+      showToast(`พบกล้อง ${cameras.value.length} ตัว`, cameras.value.length ? 'success' : 'warning')
     }
   } catch (error) {
-    console.error('Error loading cameras:', error)
-    showToast('โหลดรายการกล้องไม่สำเร็จ', 'error')
+    console.error('Error scanning cameras:', error)
+    showToast('สแกนกล้องไม่สำเร็จ', 'error')
     cameras.value = []
   } finally {
     loadingCameras.value = false
   }
 }
 
-const refreshCameras = async () => {
-  showToast('กำลังค้นหากล้อง...', 'info')
-  await loadCameras()
-  if (cameras.value.length > 0) {
-    showToast(`พบกล้อง ${cameras.value.length} ตัว`, 'success')
-  } else {
-    showToast('ไม่พบกล้อง Luxonis', 'warning')
+// Pin the camera the next connect will use ('' vendor = auto-detect)
+const selectCamera = async (vendor, deviceId) => {
+  try {
+    const resp = await axios.post('/api/camera/select', {
+      vendor: vendor || '',
+      device_id: deviceId != null ? String(deviceId) : ''
+    })
+    if (resp.data.success) {
+      selectedVendor.value = vendor || ''
+      selectedDeviceId.value = deviceId != null ? String(deviceId) : ''
+      showToast(vendor ? `เลือกกล้อง ${vendor}` : 'ตั้งเป็น Auto-detect', 'success')
+    } else {
+      showToast(resp.data.message || 'เลือกกล้องไม่สำเร็จ', 'error')
+    }
+  } catch (error) {
+    showToast(error.response?.data?.message || 'เลือกกล้องไม่สำเร็จ', 'error')
   }
-}
-
-const formatMxId = (mxid) => {
-  // Format MxID to be more readable (show first 8 chars)
-  return mxid ? `${mxid.substring(0, 8)}...` : 'Unknown'
 }
 
 
@@ -520,10 +536,9 @@ const resetToDefaults = () => {
   }
 }
 
-// ✅ Load configurations on mount
+// ✅ Scan cameras on mount
 onMounted(() => {
-  loadCameras()
-  // loadConfigurations() // ✅ COMMENTED OUT - use ConfigurationManager instead
+  scanCameras()
 })
 </script>
 
@@ -1040,6 +1055,30 @@ onMounted(() => {
 /* Camera List Styles */
 .camera-list {
   margin-top: 12px;
+}
+
+.camera-source-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.camera-vendors {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.camera-item {
+  cursor: pointer;
+}
+
+.camera-item.active {
+  border-color: var(--primary-color, #7c5cff);
+  box-shadow: 0 0 0 1px var(--primary-color, #7c5cff) inset;
 }
 
 .loading-state {
