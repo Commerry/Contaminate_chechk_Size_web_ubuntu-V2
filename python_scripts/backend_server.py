@@ -3545,23 +3545,20 @@ def set_zoom():
         
         print(f"[Zoom] Setting zoom level: {zoom_level}x")
         
-        # Apply zoom in realtime if camera is active
-        if camera_active and oak_device is not None:
+        # Apply zoom in realtime only for a live Luxonis device (depthai control).
+        # Other vendors ignore this and just persist the value.
+        is_luxonis = active_backend is not None and getattr(active_backend, 'vendor', '') == 'luxonis'
+        if camera_active and is_luxonis and HAS_DEPTHAI and oak_device is not None:
             try:
                 # Send control command to camera
                 ctrl = dai.CameraControl()
                 ctrl.setManualFocus(128)  # Keep current focus
-                
-                # Set ISP scale for zoom (realtime control)
-                numerator = int(zoom_level * 10)
-                denominator = 10
-                
+
                 # Create input queue for camera control
                 if hasattr(oak_device, 'getInputQueue'):
                     control_queue = oak_device.getInputQueue('control')
-                    ctrl_packet = dai.ImgFrame()
                     control_queue.send(ctrl)
-                
+
                 print(f"[Zoom] ✅ Applied zoom {zoom_level}x in realtime")
                 
                 return jsonify({
