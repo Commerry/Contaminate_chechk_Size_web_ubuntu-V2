@@ -216,7 +216,6 @@ import time
 oak_pipeline = None
 oak_device = None
 latest_frame = None
-latest_depth = None
 latest_annotated_frame = None  # ✅ เก็บภาพที่วาดกรอบแล้ว
 latest_contour_mask = None  # เพื่อแสดง contour visualization
 tracked_objects = {}  # ✅ เก็บ tracked objects กับ ID {id: {bbox, info}}
@@ -293,7 +292,7 @@ def get_object_color(object_index):
 
 def camera_loop(generation=0):
     """Background thread for camera processing (supports LAN/PoE cameras) - runs continuously"""
-    global latest_frame, latest_depth, running, oak_device, oak_pipeline, camera_active, last_frame_time
+    global latest_frame, running, oak_device, oak_pipeline, camera_active, last_frame_time
     
     consecutive_errors = 0
     max_consecutive_errors = 100  # ลดลงเพื่อ detect ปัญหาเร็วขึ้น
@@ -314,10 +313,9 @@ def camera_loop(generation=0):
     frame_skip_counter = 0
     frame_skip_rate = 2  # ⚡ ส่งทุก 3 เฟรม (15fps → 5fps effective) = Smooth + Efficient!
     
-    # ✅ Cache output queues to avoid recreating them every frame
+    # ✅ Cache output queue to avoid recreating it every frame
     cached_device_for_queues = None
     queue_rgb = None
-    queue_depth = None
 
     print("[CAMERA LOOP] ⚡ Starting camera loop thread (BALANCED mode: Smooth + Efficient)...")
     print(f"[CAMERA LOOP] Frame skip rate: {frame_skip_rate} (sending every {frame_skip_rate + 1} frames = ~5 FPS for smooth experience)")
@@ -361,34 +359,26 @@ def camera_loop(generation=0):
                 if oak_device != cached_device_for_queues:
                     try:
                         queue_rgb = oak_device.getOutputQueue(name="rgb", maxSize=1, blocking=False)
-                        queue_depth = oak_device.getOutputQueue(name="depth", maxSize=1, blocking=False)
                         cached_device_for_queues = oak_device
-                        print("[CAMERA] ✅ Output queues initialized/refreshed")
+                        print("[CAMERA] ✅ Output queue initialized/refreshed")
                     except Exception as qe:
-                        print(f"[CAMERA] ⚠️ Failed to init queues: {qe}")
+                        print(f"[CAMERA] ⚠️ Failed to init queue: {qe}")
                         queue_rgb = None
-                        queue_depth = None
-                
-                if queue_rgb is None or queue_depth is None:
+
+                if queue_rgb is None:
                     time.sleep(0.5)
                     continue
-                
+
                 # Get RGB frame with maxSize=1 to prevent buffer buildup
                 in_rgb = queue_rgb.tryGet()
-                
-                # Get depth frame with maxSize=1
-                in_depth = queue_depth.tryGet()
-                
+
                 # ✅ Clear old frames from queue to prevent lag
-                # ล้าง queue เพื่อไม่ให้ frame เก่าสะสม
                 try:
                     while queue_rgb.has():
                         queue_rgb.tryGet()  # ดึงและทิ้ง
-                    while queue_depth.has():
-                        queue_depth.tryGet()  # ดึงและทิ้ง
                 except:
                     pass
-                
+
                 got_frame = False
                 
                 # ✅ Frame Skipping - ลด network load
@@ -413,23 +403,7 @@ def camera_loop(generation=0):
                         got_frame = True
                     except Exception as e:
                         print(f" Failed to get RGB frame: {e}")
-                
-                if in_depth is not None:
-                    try:
-                        depth = in_depth.getFrame()
-                        # อัพเดท depth เฉพาะเมื่อควร process
-                        if should_process:
-                            with frame_lock:
-                                # ✅ ลบ depth เก่าก่อนเก็บ depth ใหม่เพื่อ free memory
-                                if latest_depth is not None:
-                                    del latest_depth
-                                latest_depth = depth.copy()
-                        # ✅ ลบ depth ชั่วคราวเพื่อ free memory
-                        del depth
-                        got_frame = True
-                    except Exception as e:
-                        print(f" Failed to get depth frame: {e}")
-                
+
                 if got_frame:
                     consecutive_errors = 0  # Reset on success
                     recovery_attempts = 0  # Reset recovery counter
@@ -618,10 +592,9 @@ def camera_loop(generation=0):
                         print(f"[CAMERA] ✅ Stable - {frame_count} frames sent, {total_errors} errors, est. bandwidth: {estimated_bandwidth_mbps:.1f} Mbps")
             else:
                 print(" ❌ Device is closed unexpectedly!")
-                # Reset queue cache so they get re-created after reconnect
+                # Reset queue cache so it gets re-created after reconnect
                 cached_device_for_queues = None
                 queue_rgb = None
-                queue_depth = None
                 # พยายาม reconnect ทันที
                 if recovery_attempts < max_recovery_attempts:
                     recovery_attempts += 1
@@ -688,8 +661,7 @@ def camera_loop(generation=0):
                         # Reset queue cache
                         cached_device_for_queues = None
                         queue_rgb = None
-                        queue_depth = None
-                        
+
                         # Wait longer for LAN camera (network latency)
                         wait_time = min(5.0 * (2 ** (recovery_attempts - 1)), 20.0)  # เพิ่มเป็น 5s-20s สำหรับ LAN
                         print(f" Waiting {wait_time:.1f}s for LAN camera...")
@@ -825,45 +797,14 @@ def initialize_oak_camera():
         # cam_rgb.initialControl.setSaturation(0)   # -10 to 10
         
         print(f"    RGB camera configured: 1280x720 @ {fps}fps with Auto Focus + Auto Exposure (Balanced: Smooth + Efficient)")
-        
-        # Create stereo depth
-        print("[STEP 5] Configuring stereo depth nodes...")
-        mono_left = pipeline.create(dai.node.MonoCamera)
-        mono_right = pipeline.create(dai.node.MonoCamera)
-        stereo = pipeline.create(dai.node.StereoDepth)
-        
-        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-        
-        # ใช้ HIGH_DENSITY แทน HIGH_ACCURACY - เบากว่ามาก
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
-        stereo.setLeftRightCheck(False)  # ปิด - ลดภาระการคำนวณ
-        stereo.setExtendedDisparity(False)
-        stereo.setSubpixel(False)  # ปิด subpixel - ลดภาระมาก
-        
-        # ลด confidence threshold - ยอมรับ depth ที่ confidence ต่ำกว่า
-        stereo.initialConfig.setConfidenceThreshold(150)  # ลดจาก 200
-        
-        # ใช้ median filter เล็กลง - ลดภาระการประมวลผล
-        stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_3x3)
-        
-        mono_left.out.link(stereo.left)
-        mono_right.out.link(stereo.right)
-        print("    Stereo depth configured: 400p")
-        
-        # Create outputs
-        print("[STEP 6] Creating output streams...")
+
+        # Create RGB output stream (depth removed - sizing is pixel-calibration based)
+        print("[STEP 5] Creating output stream...")
         xout_rgb = pipeline.create(dai.node.XLinkOut)
         xout_rgb.setStreamName("rgb")
         cam_rgb.preview.link(xout_rgb.input)
-        
-        xout_depth = pipeline.create(dai.node.XLinkOut)
-        xout_depth.setStreamName("depth")
-        stereo.depth.link(xout_depth.input)
-        print("    Output streams created: rgb, depth")
-        
+        print("    Output stream created: rgb")
+
         # Connect to OAK camera (Universal support for all Luxonis models)
         # Auto-detect CSI/USB first, then Network if configured
         # Supports: OAK-D-CM4 (CSI), OAK-D (USB), OAK-1-PoE (Network), etc.
@@ -1053,10 +994,7 @@ def initialize_oak_camera():
         for i in range(max_wait_time * 10):  # Check every 0.1s
             time.sleep(0.1)
             with frame_lock:
-                if latest_frame is not None and latest_depth is not None:
-                    print(f"    Frames received! RGB: {latest_frame.shape}, Depth: {latest_depth.shape}")
-                    break
-                elif latest_frame is not None:
+                if latest_frame is not None:
                     print(f"    RGB frame received: {latest_frame.shape}")
                     break
         else:
@@ -1100,7 +1038,7 @@ def stop_oak_camera(user_initiated=False):
     here, and clearing the contour flag then silently switched detection off
     behind the user's back once the camera came back.
     """
-    global oak_device, oak_pipeline, running, camera_thread, camera_active, latest_frame, latest_depth
+    global oak_device, oak_pipeline, running, camera_thread, camera_active, latest_frame
     global tracked_objects, next_object_id, contour_detection_active
     
     try:
@@ -1154,8 +1092,7 @@ def stop_oak_camera(user_initiated=False):
         # Step 5: Clear frame buffers
         with frame_lock:
             latest_frame = None
-            latest_depth = None
-        
+
         # Step 6: Reset tracking
         tracked_objects = {}
         next_object_id = 1
@@ -1182,189 +1119,10 @@ def stop_oak_camera(user_initiated=False):
         
         return False
 
-def apply_contrast_enhancement(frame, alpha=1.5, beta=30):
-    """Apply contrast enhancement using CLAHE (Contrast Limited Adaptive Histogram Equalization)"""
-    try:
-        # Convert to LAB color space
-        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        
-        # Apply CLAHE to L channel with higher intensity
-        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-        l_enhanced = clahe.apply(l)
-        
-        # Merge channels back
-        enhanced_lab = cv2.merge([l_enhanced, a, b])
-        enhanced_frame = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
-        
-        # Apply additional brightness/contrast adjustment
-        enhanced_frame = cv2.convertScaleAbs(enhanced_frame, alpha=1.2, beta=10)
-        
-        return enhanced_frame
-    except Exception as e:
-        print(f"Error applying contrast: {e}")
-        return frame
+def get_camera_frame():
+    """Get current annotated RGB frame from camera (JPEG base64)."""
+    global latest_frame, camera_active, last_frame_time
 
-def apply_depth_colormap(depth_normalized, colorscheme='gray'):
-    """Apply color mapping to normalized depth frame (expects uint8 0-255)"""
-    try:
-        # Ensure input is uint8
-        if depth_normalized.dtype != np.uint8:
-            depth_normalized = depth_normalized.astype(np.uint8)
-        
-        # Apply colormap based on scheme
-        if colorscheme == 'jet':
-            colored_depth = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-        elif colorscheme == 'rainbow':
-            colored_depth = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_RAINBOW)
-        elif colorscheme == 'turbo':
-            colored_depth = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_TURBO)
-        elif colorscheme == 'hot':
-            colored_depth = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_HOT)
-        elif colorscheme == 'cool':
-            colored_depth = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_COOL)
-        else:  # gray (default)
-            colored_depth = cv2.cvtColor(depth_normalized, cv2.COLOR_GRAY2BGR)
-        
-        return colored_depth
-    except Exception as e:
-        print(f"Error applying depth colormap: {e}")
-        # Return grayscale as fallback
-        return cv2.cvtColor(depth_normalized, cv2.COLOR_GRAY2BGR)
-
-def get_contrast_preview():
-    """
-    Get depth-based height visualization preview
-    Uses DEPTH CAMERA to measure object height at SAME LOCATION as RGB detection
-    This ensures depth measurements are for the SAME objects detected by RGB camera
-    """
-    global latest_depth, latest_frame
-    try:
-        with frame_lock:
-            if latest_depth is None:
-                return None
-            depth = latest_depth.copy()
-        
-        # Depth data is in millimeters (uint16: 0-65535)
-        # Clip to reasonable range (300mm to 3000mm = 30cm to 3m)
-        depth_clipped = np.clip(depth, 300, 3000)
-        
-        # Normalize to 0-255 for visualization (closer = red, farther = blue)
-        depth_normalized = ((depth_clipped - 300) / (3000 - 300) * 255).astype(np.uint8)
-        
-        # Apply JET colormap (blue=far, red=close)
-        depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-        
-        # Get current detections from RGB camera
-        detections = detect_objects()
-        
-        # Draw height measurements for SAME objects as RGB detection
-        for detection in detections:
-            if 'bbox' not in detection:
-                continue
-            
-            bbox = detection['bbox']
-            x, y, w, h = bbox
-            
-            # Make sure bbox is within depth map bounds
-            x = max(0, min(x, depth.shape[1] - 1))
-            y = max(0, min(y, depth.shape[0] - 1))
-            w = max(1, min(w, depth.shape[1] - x))
-            h = max(1, min(h, depth.shape[0] - y))
-            
-            # Extract depth values at detection location
-            object_depth_region = depth[y:y+h, x:x+w]
-            valid_depths = object_depth_region[(object_depth_region > 300) & (object_depth_region < 3000)]
-            
-            if len(valid_depths) > 10:  # Need sufficient data points
-                # Calculate height: difference between closest and farthest point
-                min_depth = np.percentile(valid_depths, 5)  # 5th percentile (filter outliers)
-                max_depth = np.percentile(valid_depths, 95)  # 95th percentile
-                avg_depth = np.median(valid_depths)
-                object_height_mm = abs(max_depth - min_depth)
-                
-                # Draw bounding box (SAME as RGB detection)
-                cv2.rectangle(depth_colored, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                
-                # Draw detection label from RGB
-                detection_label = detection.get('label', 'Object')
-                confidence = detection.get('confidence', 0) * 100
-                
-                # Draw height and depth info
-                label = f"{detection_label} {confidence:.0f}%"
-                label2 = f"H:{object_height_mm:.0f}mm D:{avg_depth:.0f}mm"
-                
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-                cv2.rectangle(depth_colored, (x, y-label_size[1]-25), (x+max(label_size[0], 150), y), (0, 0, 0), -1)
-                cv2.putText(depth_colored, label, (x+4, y-15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                cv2.putText(depth_colored, label2, (x+4, y-3), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-        
-        # Add color scale legend
-        legend_h = 20
-        legend_w = depth_colored.shape[1] - 40
-        legend_gradient = np.linspace(0, 255, legend_w, dtype=np.uint8).reshape(1, -1)
-        legend_gradient = np.repeat(legend_gradient, legend_h, axis=0)
-        legend_colored = cv2.applyColorMap(legend_gradient, cv2.COLORMAP_JET)
-        
-        # Draw legend on image
-        depth_colored[10:10+legend_h, 20:20+legend_w] = legend_colored
-        cv2.rectangle(depth_colored, (20, 10), (20+legend_w, 10+legend_h), (255, 255, 255), 2)
-        cv2.putText(depth_colored, "CLOSE", (25, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.putText(depth_colored, "FAR", (20+legend_w-40, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        
-        # Resize to preview size
-        preview_h = 300
-        preview_w = int(depth_colored.shape[1] * preview_h / depth_colored.shape[0])
-        preview_resized = cv2.resize(depth_colored, (preview_w, preview_h))
-        
-        # Encode to base64
-        _, buffer = cv2.imencode('.jpg', preview_resized, [cv2.IMWRITE_JPEG_QUALITY, 50])  # ✅ ลดเป็น 50%
-        frame_base64 = base64.b64encode(buffer).decode('utf-8')
-        return f"data:image/jpeg;base64,{frame_base64}"
-    except Exception as e:
-        print(f"Error getting contrast preview: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def get_depth_preview(colorscheme='gray'):
-    """Get depth map preview with color scheme (full scene depth visualization)"""
-    global latest_depth
-    try:
-        with frame_lock:
-            if latest_depth is None:
-                return None
-            depth = latest_depth.copy()
-        
-        # Clip depth to reasonable range (300-3000mm)
-        depth_clipped = np.clip(depth, 300, 3000)
-        
-        # Normalize to 0-255 with better contrast
-        depth_normalized = ((depth_clipped - 300) / (3000 - 300) * 255).astype(np.uint8)
-        
-        # Enhance contrast using histogram equalization
-        depth_enhanced = cv2.equalizeHist(depth_normalized)
-        
-        # Apply selected colormap
-        depth_colored = apply_depth_colormap(depth_enhanced, colorscheme)
-        
-        # Resize to smaller preview size (40% ของเดิม)
-        preview_h = 180  # ✅ ลดจาก 300 เป็น 180
-        preview_w = int(depth_colored.shape[1] * preview_h / depth_colored.shape[0])
-        depth_resized = cv2.resize(depth_colored, (preview_w, preview_h))
-        
-        # Encode to base64 with LOW quality
-        _, buffer = cv2.imencode('.jpg', depth_resized, [cv2.IMWRITE_JPEG_QUALITY, 50])  # ✅ ลดเป็น 50%
-        frame_base64 = base64.b64encode(buffer).decode('utf-8')
-        return f"data:image/jpeg;base64,{frame_base64}"
-    except Exception as e:
-        print(f"Error getting depth preview: {e}")
-        return None
-
-def get_camera_frame(enable_contrast=False, depth_colorscheme='gray'):
-    """Get current frame from camera with optional contrast and depth colorization"""
-    global latest_frame, latest_depth, camera_active, last_frame_time
-    
     try:
         # ✅ FIX: ตรวจสอบทั้ง camera_active, oak_device และ device.isClosed()
         device_ok = (oak_device is not None and not oak_device.isClosed()) if oak_device else False
@@ -1393,15 +1151,9 @@ def get_camera_frame(enable_contrast=False, depth_colorscheme='gray'):
                     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
                     cv2.putText(frame, "Camera Connected - Waiting for frames...", (650, 500), 
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 0), 2)
-                    cv2.putText(frame, "If this persists, try stopping and restarting camera", (600, 560), 
+                    cv2.putText(frame, "If this persists, try stopping and restarting camera", (600, 560),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 0), 2)
-                
-                depth = latest_depth.copy() if latest_depth is not None else None
-            
-            # Don't modify the main frame - keep it as original RGB with detections
-            # Contrast and depth visualizations will be provided separately
-            pass
-        
+
         # ✅ ภาพถูก resize แล้วตอนเก็บ (60%) ไม่ต้อง resize อีก
         # Encode to base64 with LOW quality for bandwidth
         _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])  # ✅ ลดเป็น 50%
@@ -1419,247 +1171,10 @@ def get_camera_frame(enable_contrast=False, depth_colorscheme='gray'):
         frame_base64 = base64.b64encode(buffer).decode('utf-8')
         return f"data:image/jpeg;base64,{frame_base64}"
 
-def find_object_contour(depth_frame, ground_distance):
-    """
-    Find object contour for irregular-shaped objects (like clay/putty)
-    Uses depth segmentation to separate object from background
-    Returns:
-    - bbox: [x, y, w, h] - axis-aligned bounding box
-    - min_rect: ((cx, cy), (width, height), angle) - minimum area rectangle
-    - contour: largest contour points
-    - hull: convex hull points
-    """
-    try:
-        # Create mask for object region (closer than ground)
-        # Objects are closer to camera (smaller depth values) than ground
-        object_threshold = ground_distance - 50  # 50mm tolerance
-        object_mask = (depth_frame < object_threshold) & (depth_frame > 300)
-        object_mask = object_mask.astype(np.uint8) * 255
-        
-        # Morphological operations to clean up noise
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
-        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, kernel)
-        
-        # Find contours
-        contours, _ = cv2.findContours(object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if len(contours) == 0:
-            return None
-        
-        # Find largest contour (main object)
-        largest_contour = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(largest_contour)
-        
-        # Filter out small noise (minimum 50 pixels ≈3mm x 3mm)
-        if area < 50:
-            return None
-        
-        # 1. Axis-aligned bounding box (เดิม)
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        bbox = [x, y, w, h]
-        
-        # 2. Minimum area rectangle (กรอบที่เล็กที่สุด - อาจเอียง)
-        # → ได้ width × height ที่แท้จริงของวัตถุ
-        min_rect = cv2.minAreaRect(largest_contour)
-        # min_rect = ((center_x, center_y), (width, height), angle)
-        
-        # 3. Convex hull (เส้นรอบนอกสุด)
-        # → คำนวณพื้นที่ภายในได้
-        hull = cv2.convexHull(largest_contour)
-        
-        return {
-            'bbox': bbox,
-            'min_rect': min_rect,
-            'contour': largest_contour,
-            'hull': hull,
-            'area_pixels': area,
-            'hull_area_pixels': cv2.contourArea(hull)
-        }
-        
-    except Exception as e:
-        print(f"Error finding object contour: {e}")
-        return None
-
 def measure_object(bbox=None):
-    """Measure object dimensions using depth data with ground plane detection"""
-    global latest_depth, latest_frame, camera_active
-    
-    try:
-        print(f"[MEASURE] Starting measurement - bbox={bbox}, camera_active={camera_active}, oak_device={oak_device is not None}")
-        
-        # Return empty measurement if camera not active
-        if not camera_active or oak_device is None:
-            print(f"[MEASURE] Skipped - camera_active={camera_active}, oak_device={oak_device is not None}")
-            return {
-                'width': 0,
-                'height': 0,
-                'depth': 0,
-                'volume': 0,
-                'hasObject': False
-            }
-        
-        with frame_lock:
-            if latest_depth is None:
-                return {
-                    'width': 0,
-                    'height': 0,
-                    'depth': 0,
-                    'volume': 0,
-                    'hasObject': False
-                }
-            
-            depth = latest_depth.copy()
-        
-        # Step 1: Detect ground plane distance (bottom 20% of frame)
-        h_frame, w_frame = depth.shape
-        ground_roi = depth[int(h_frame * 0.8):h_frame, int(w_frame * 0.2):int(w_frame * 0.8)]
-        ground_valid = ground_roi[(ground_roi > 300) & (ground_roi < 3000)]
-        
-        if len(ground_valid) == 0:
-            return {
-                'width': 0,
-                'height': 0,
-                'depth': 0,
-                'volume': 0,
-                'hasObject': False
-            }
-        
-        ground_distance = float(np.median(ground_valid))
-        
-        # Step 2: Find object using contour detection if no bbox provided
-        contour_data = None
-        if bbox is None:
-            print(f"[MEASURE] No bbox provided, using contour detection")
-            result = find_object_contour(depth, ground_distance)
-            if result is None:
-                print(f"[MEASURE] No object found via contour detection")
-                return {
-                    'width': 0,
-                    'height': 0,
-                    'depth': 0,
-                    'volume': 0,
-                    'hasObject': False
-                }
-            
-            # Check if result is dict (new format) or list (old format)
-            if isinstance(result, dict):
-                contour_data = result
-                bbox = contour_data['bbox']
-            else:
-                # Backward compatibility: old format returns [x, y, w, h]
-                bbox = result
-                contour_data = None
-        
-        # Step 3: Extract object ROI
-        x, y, w, h = bbox
-        h_depth, w_depth = depth.shape
-        
-        # **CRITICAL FIX: Convert RGB coordinates to Depth coordinates**
-        # RGB frame is 1920x1080 (or config preview size)
-        # Depth frame is 640x400 (stereo resolution)
-        preview_w = system_config.get('preview_width', 1920)
-        preview_h = system_config.get('preview_height', 1080)
-        
-        scale_x = w_depth / preview_w
-        scale_y = h_depth / preview_h
-        
-        # Scale bbox coordinates
-        x = int(x * scale_x)
-        y = int(y * scale_y)
-        w = int(w * scale_x)
-        h = int(h * scale_y)
-        
-        # Ensure ROI is within bounds
-        x = max(0, min(x, w_depth - 1))
-        y = max(0, min(y, h_depth - 1))
-        w = max(1, min(w, w_depth - x))
-        h = max(1, min(h, h_depth - y))
-        
-        print(f"[MEASURE] Original bbox={bbox}, Scaled bbox=[{x},{y},{w},{h}], Depth shape={depth.shape}")
-        
-        roi_depth = depth[y:y+h, x:x+w]
-        
-        # Filter valid depth values in object ROI
-        valid_depths = roi_depth[(roi_depth > 300) & (roi_depth < ground_distance)]
-        
-        print(f"[MEASURE] bbox=[{x},{y},{w},{h}], ground_distance={ground_distance:.1f}mm, valid_depths={len(valid_depths)}")
-        
-        if len(valid_depths) == 0:
-            print(f"[MEASURE] No valid depth values in ROI")
-            return {
-                'width': 0,
-                'height': 0,
-                'depth': 0,
-                'volume': 0,
-                'hasObject': False
-            }
-        
-        # ⭐⭐ CALIBRATED: วัดขนาดจาก BOUNDING BOX พร้อม calibration
-        # ตรึงความสูงกล้องไว้ที่ 400mm (ประมาณ 40cm)
-        # 
-        # 🎯 CALIBRATION: อ้างอิงจากวัตถุจริง W=80mm H=90mm
-        # โปรแกรมวัดได้: W=61.6mm H=72.0mm
-        # 
-        # Scale factors:
-        # - WIDTH:  80 / 61.6 = 1.299
-        # - HEIGHT: 90 / 72.0 = 1.25
-        
-        FIXED_CAMERA_HEIGHT = 400.0  # mm - ความสูงกล้องคงที่
-        
-        # ✅ ใช้ calibration factors จาก current_settings (เหมือนกับ detect_by_contour)
-        PIXEL_TO_MM_WIDTH = current_settings['calibration_width']
-        PIXEL_TO_MM_HEIGHT = current_settings['calibration_height']
-        
-        # คำนวณขนาดจริงจาก bounding box pixel พร้อม calibration
-        width_mm = w * PIXEL_TO_MM_WIDTH    # ✅ ซ้าย-ขวา (calibrated)
-        height_mm = h * PIXEL_TO_MM_HEIGHT  # ✅ บน-ล่าง (calibrated)
-        
-        # ⛔ คอมเม้น DEPTH - ไม่น่าเชื่อถือ
-        # median_depth = np.median(valid_depths)
-        # object_top_distance = float(np.percentile(valid_depths, 5))
-        # depth_mm = ground_distance - object_top_distance
-        depth_mm = 0.0  # ไม่แสดงค่า depth
-        
-        # Log ค่าที่คำนวณได้
-        print(f"[MEASURE] 📐 bbox=[{w}x{h}px], W_scale={PIXEL_TO_MM_WIDTH:.3f}, H_scale={PIXEL_TO_MM_HEIGHT:.3f}, camera_height={FIXED_CAMERA_HEIGHT}mm")
-        
-        # ⭐ FIXED: แสดงค่าจาก bounding box โดยตรง
-        measurements = {
-            'width': float(width_mm),   # ✅ จาก bbox width × scale
-            'height': float(height_mm), # ✅ จาก bbox height × scale
-            'depth': float(depth_mm),   # ⛔ ปิดการใช้งาน (0.0)
-            'hasObject': True
-        }
-        
-        # ⛔ Volume ไม่มีความหมายเพราะไม่มี depth
-        measurements['volume'] = 0.0
-        
-        print(f"[MEASURE] ✅ W:{measurements['width']:.1f}mm H:{measurements['height']:.1f}mm (D:disabled)")
-
-
-        
-        # ⭐ NEW: Add surface area and hull area if available
-        if contour_data is not None:
-            # Convert pixel area to mm²
-            pixel_to_mm2 = (median_depth / focal_length_px) ** 2
-            measurements['surface_area_mm2'] = float(contour_data['area_pixels'] * pixel_to_mm2)
-            measurements['hull_area_mm2'] = float(contour_data['hull_area_pixels'] * pixel_to_mm2)
-            measurements['fill_ratio'] = float(contour_data['area_pixels'] / contour_data['hull_area_pixels'])
-            
-            print(f"[Area] Surface: {measurements['surface_area_mm2']:.0f}mm², Hull: {measurements['hull_area_mm2']:.0f}mm², Fill: {measurements['fill_ratio']*100:.1f}%")
-        
-        return measurements
-        
-    except Exception as e:
-        print(f"Error measuring object: {e}")
-        return {
-            'width': 0,
-            'height': 0,
-            'depth': 0,
-            'volume': 0,
-            'hasObject': False
-        }
+    """Deprecated: depth-based sizing removed. Sizing now comes from the
+    contour bounding box * pixel calibration (see detect_by_contour)."""
+    return {'width': 0, 'height': 0, 'depth': 0, 'volume': 0, 'hasObject': False}
 
 def calculate_iou(box1, box2):
     """Calculate Intersection over Union (IOU) between two boxes"""
@@ -1890,39 +1405,34 @@ def draw_dimension_lines(img, x, y, w, h, width_mm, height_mm, color=(0, 0, 255)
 
 def detect_objects():
     """
-    DETECTION: Contour-based detection only
-    
-    โหมด:
-    1. Contour Detection (contour_detection_active) - แยกพื้นหลังสีขาว
-    2. Depth-based fallback - ใช้ความลึก
+    DETECTION: Contour-based detection only (RGB, no depth)
     """
-    global latest_depth, latest_frame, camera_active, contour_detection_active
-    
+    global latest_frame, camera_active, contour_detection_active
+
     # Debug: Log state periodically (every 30 calls)
     if not hasattr(detect_objects, 'call_count'):
         detect_objects.call_count = 0
     detect_objects.call_count += 1
-    
+
     try:
         # Check camera is active
         if not camera_active or oak_device is None:
             if detect_objects.call_count % 30 == 0:
                 print(f"[DETECTION SKIP] camera_active={camera_active}")
             return []
-        
-        # Get frames
+
+        # Get frame
         with frame_lock:
-            if latest_depth is None or latest_frame is None:
+            if latest_frame is None:
                 return []
-            depth = latest_depth.copy()
             frame = latest_frame.copy()
-        
+
         # === MODE 1: CONTOUR DETECTION ===
         if contour_detection_active:
             if detect_objects.call_count % 30 == 0:
                 print(f"[DETECTION] Contour mode active - calling detect_by_contour()")
-            return detect_by_contour(frame, depth)
-        
+            return detect_by_contour(frame)
+
         # No detection mode active
         if detect_objects.call_count % 30 == 0:
             print(f"[DETECTION] No detection mode active - contour={contour_detection_active}")
@@ -1930,190 +1440,6 @@ def detect_objects():
         
     except Exception as e:
         print(f" detect_objects: {e}")
-        return []
-
-def detect_by_contour_zones(frame, depth):
-    """ตรวจจับวัตถุใน 3 zones แยกกัน - 1 วัตถุต่อ 1 zone"""
-    global latest_contour_mask
-    
-    try:
-        frame_h, frame_w = frame.shape[:2]
-        depth_mm = depth.astype(np.float32)
-        if depth.shape[:2] != frame.shape[:2]:
-            depth_mm = cv2.resize(depth_mm, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
-        
-        # 🎯 แบ่ง frame เป็น 3 zones แนวนอน (ซ้าย-กลาง-ขวา)
-        zone_width = frame_w // 3
-        zones = [
-            {'id': 1, 'name': 'Zone 1', 'x': 0, 'w': zone_width},
-            {'id': 2, 'name': 'Zone 2', 'x': zone_width, 'w': zone_width},
-            {'id': 3, 'name': 'Zone 3', 'x': zone_width * 2, 'w': frame_w - (zone_width * 2)}
-        ]
-        
-        all_objects = []
-        
-        # ตรวจจับวัตถุในแต่ละ zone แยกกัน
-        for zone in zones:
-            zone_x = zone['x']
-            zone_w = zone['w']
-            
-            # ตัด frame และ depth สำหรับ zone นี้
-            zone_frame = frame[:, zone_x:zone_x+zone_w]
-            zone_depth = depth_mm[:, zone_x:zone_x+zone_w]
-            
-            # ตรวจจับวัตถุใน zone นี้
-            zone_objects = detect_in_single_zone(zone_frame, zone_depth, zone)
-            
-            if zone_objects:
-                # ปรับ bbox coordinates กลับไปที่ full frame
-                for obj in zone_objects:
-                    x, y, w, h = obj['bbox']
-                    original_bbox = obj['bbox'].copy()
-                    obj['bbox'] = [x + zone_x, y, w, h]  # เพิ่ม offset x
-                    obj['zone_id'] = zone['id']
-                    obj['zone_name'] = zone['name']
-                    print(f"  [DEBUG] {zone['name']}: bbox before={original_bbox}, after={obj['bbox']}")
-                
-                all_objects.extend(zone_objects)
-        
-        print(f"[3-ZONE] Detected {len(all_objects)} objects across 3 zones")
-        for obj in all_objects:
-            print(f"  [DEBUG] Final object bbox={obj['bbox']}, zone={obj.get('zone_name', 'N/A')}")
-        return all_objects
-        
-    except Exception as e:
-        print(f"❌ detect_by_contour_zones: {e}")
-        return []
-
-def detect_in_single_zone(zone_frame, zone_depth, zone_info):
-    """ตรวจจับวัตถุ 1 ชิ้นใน zone เดียว"""
-    try:
-        zone_h, zone_w = zone_frame.shape[:2]
-        
-        # === STEP 1: Convert to grayscale ===
-        gray = cv2.cvtColor(zone_frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # === STEP 2: โฟกัสที่วัตถุ (Rubber type dependent) ===
-        global rubber_type
-        if rubber_type == "white":
-            # ยางขาว: พื้นดำ วัตถุขาว (หาพิกเซลสว่าง)
-            _, binary_dark = cv2.threshold(blurred, 190, 255, cv2.THRESH_BINARY)
-        else:
-            # ยางดำ (default): พื้นขาว วัตถุดำ (หาพิกเซลมืด)
-            _, binary_dark = cv2.threshold(blurred, 65, 255, cv2.THRESH_BINARY_INV)
-        
-        # === STEP 3: HSV - เพิ่มวัตถุที่มีสี ===
-        hsv = cv2.cvtColor(zone_frame, cv2.COLOR_BGR2HSV)
-        h_channel, s_channel, v_channel = cv2.split(hsv)
-        
-        _, saturation_mask = cv2.threshold(s_channel, 15, 255, cv2.THRESH_BINARY)
-        if rubber_type == "white":
-            # ยางขาว: หา value สูง (สว่าง)
-            _, value_mask = cv2.threshold(v_channel, 200, 255, cv2.THRESH_BINARY)
-        else:
-            # ยางดำ: หา value ต่ำ (มืด)
-            _, value_mask = cv2.threshold(v_channel, 240, 255, cv2.THRESH_BINARY_INV)
-        hsv_combined = cv2.bitwise_and(saturation_mask, value_mask)
-        
-        # === STEP 4: รวม masks ===
-        combined_mask = cv2.bitwise_or(binary_dark, hsv_combined)
-        
-        # === STEP 5: Morphology ===
-        kernel_tiny = np.ones((2, 2), np.uint8)
-        binary_morphed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_tiny, iterations=1)
-        binary_final = binary_morphed
-        
-        # === STEP 6: Find contours ===
-        contours, _ = cv2.findContours(binary_final, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        print(f"  [{zone_info['name']}] Found {len(contours)} contours")
-        
-        objects = []
-        min_area = 50   # ✅ ลดเป็น 50 เพื่อรองรับวัตถุเล็กถึง 3x3mm
-        
-        for i, contour in enumerate(contours):
-            area = cv2.contourArea(contour)
-            if area < min_area:
-                if i < 3:
-                    print(f"    Contour {i}: area={area:.0f} < {min_area} (SKIP)")
-                continue
-            
-            x, y, w, h = cv2.boundingRect(contour)
-            print(f"    Contour {i}: area={area:.0f}, bbox=[{x},{y},{w},{h}]")
-            
-            # Filter ขนาดขั้นต่ำ (≈3mm)
-            if w < 5 or h < 5:
-                print(f"      -> SKIP: size too small ({w}x{h})")
-                continue
-            
-            # Aspect Ratio
-            aspect_ratio = float(w) / h if h > 0 else 0
-            if aspect_ratio < 0.1 or aspect_ratio > 10:
-                print(f"      -> SKIP: bad aspect ratio {aspect_ratio:.2f}")
-                continue
-            
-            # Valid Depth Check
-            roi_depth = zone_depth[y:y+h, x:x+w]
-            valid_depth = roi_depth[(roi_depth > 300) & (roi_depth < 2500)]
-            
-            valid_depth_ratio = len(valid_depth) / (w * h) if (w * h) > 0 else 0
-            if valid_depth_ratio < 0.03:
-                print(f"      -> SKIP: not enough valid depth {valid_depth_ratio*100:.1f}%")
-                continue
-            
-            avg_depth = float(np.median(valid_depth)) if len(valid_depth) > 10 else 0
-            
-            # คำนวณขนาด physical size
-            HFOV = 69
-            focal_length_px = (zone_w / 2) / np.tan(np.radians(HFOV / 2))
-            
-            if avg_depth > 0:
-                width_mm = (w * avg_depth) / focal_length_px
-                height_mm = (h * avg_depth) / focal_length_px
-            else:
-                width_mm = 0
-                height_mm = 0
-            
-            # คำนวณ Score
-            area_score = (area / 10000) * 0.6
-            center_x = x + w/2
-            center_y = y + h/2
-            zone_center_x = zone_w / 2
-            zone_center_y = zone_h / 2
-            distance_from_center = np.sqrt((center_x - zone_center_x)**2 + (center_y - zone_center_y)**2)
-            max_distance = np.sqrt(zone_center_x**2 + zone_center_y**2)
-            center_score = (1 - distance_from_center / max_distance) * 0.25
-            depth_quality_score = valid_depth_ratio * 0.15
-            score = area_score + center_score + depth_quality_score
-            
-            print(f"      -> ✅ VALID object: score={score:.3f}, size={width_mm:.1f}x{height_mm:.1f}mm")
-            
-            objects.append({
-                'label': f'{zone_info["name"]}',
-                'confidence': 0.95,
-                'bbox': [int(x), int(y), int(w), int(h)],
-                'depth_mm': avg_depth,
-                'detection_method': 'zone_contour',
-                'valid_depth_ratio': valid_depth_ratio,
-                'valid_depth_pixels': len(valid_depth),
-                'score': score,
-                'width_mm': width_mm,
-                'height_mm': height_mm
-            })
-        
-        # เลือกวัตถุที่ดีที่สุด 1 ชิ้น ต่อ zone
-        if len(objects) > 0:
-            objects.sort(key=lambda obj: obj['score'], reverse=True)
-            best_object = objects[0]
-            print(f"  [{zone_info['name']}] ✅ Selected BEST: bbox={best_object['bbox']}, size={best_object['width_mm']:.1f}x{best_object['height_mm']:.1f}mm")
-            return [best_object]
-        
-        print(f"  [{zone_info['name']}] ⚠️ No objects found (all filtered out)")
-        return []
-        
-    except Exception as e:
-        print(f"❌ detect_in_single_zone: {e}")
         return []
 
 def apply_nms(objects, iou_threshold=0.4):
@@ -2249,19 +1575,13 @@ def merge_with_recent_detections(objects):
     return merged
 
 
-def detect_by_contour(frame, depth):
-    """ตรวจจับด้วย Contour (แยกพื้นหลังสีขาว) - พร้อม 8-layer visualization"""
+def detect_by_contour(frame):
+    """ตรวจจับด้วย Contour (แยกพื้นหลัง) - RGB only, พร้อม 8-layer visualization"""
     global latest_contour_mask, three_zone_detection_active
-    
-    # 🎯 NOTE: ไม่ redirect ไป detect_by_contour_zones อีกต่อไป
-    # ให้ตรวจจับวัตถุปกติ แล้วกรองตาม zone ภายหลัง
-    
+
     try:
         frame_h, frame_w = frame.shape[:2]
-        depth_mm = depth.astype(np.float32)
-        if depth.shape[:2] != frame.shape[:2]:
-            depth_mm = cv2.resize(depth_mm, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
-        
+
         # === STEP 1: Convert to grayscale ===
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -2374,11 +1694,6 @@ def detect_by_contour(frame, depth):
         min_area = 50   # Minimum contour area in pixels (≈3mm x 3mm)
         max_area = frame_w * frame_h * 0.25  # Anything bigger is background
         min_size = 5    # Minimum width/height in pixels (≈3mm)
-        # Stereo depth is unreliable on small dark crumbs - it drops to 0% valid
-        # pixels on some frames for a piece the contour sees perfectly well, and
-        # the piece would blink out. Size comes from the pixel calibration, not
-        # from depth, so depth no longer decides whether an object exists.
-        min_depth_ratio = 0.0
         print(f"[CONTOUR] Using thresholds: min_area={min_area}px, min_size={min_size}x{min_size}px")
         
         # ✅ DEBUG: Log total contours found
@@ -2449,48 +1764,27 @@ def detect_by_contour(frame, depth):
                     print(f"  [SKIP] Contour {i}: glint (area={area:.0f}px, brightness={median_bright:.0f})")
                 continue
             
-            # === Valid Depth Check ===
-            roi_depth = depth_mm[y:y+h, x:x+w]
-            valid_depth = roi_depth[(roi_depth > 300) & (roi_depth < 2500)]
-            
-            valid_depth_ratio = len(valid_depth) / (w * h) if (w * h) > 0 else 0
-            
-            # Filter by valid depth ratio (disabled by default, see min_depth_ratio)
-            if min_depth_ratio > 0 and valid_depth_ratio < min_depth_ratio:
-                if i < 5:
-                    print(f"  [SKIP] Contour {i}: not enough valid depth {valid_depth_ratio*100:.1f}% < {min_depth_ratio*100:.1f}%")
-                continue
-
-            avg_depth = float(np.median(valid_depth)) if len(valid_depth) > 10 else 0
-
-            # ✅ ใช้ calibration factor ที่ calibrated มาแล้ว (ไม่ใช้ focal_length)
-            # Depth is reported for information only - it must not gate the size,
-            # otherwise a frame with no usable depth reports 0mm and the object
-            # is thrown away by the size filter further down.
+            # ✅ ขนาดจาก pixel * calibration (ไม่ใช้ depth)
             width_mm = w * current_settings['calibration_width']
             height_mm = h * current_settings['calibration_height']
             print(f"  [PASS] Contour {i}: area={area:.0f}px, bbox={w}x{h}px, size={width_mm:.1f}x{height_mm:.1f}mm")
-            
-            # คำนวณ Score
-            area_score = (area / 10000) * 0.6
+
+            # คำนวณ Score (area + ระยะจากกลางเฟรม)
+            area_score = (area / 10000) * 0.7
             center_x = x + w/2
             center_y = y + h/2
             frame_center_x = frame_w / 2
             frame_center_y = frame_h / 2
             distance_from_center = np.sqrt((center_x - frame_center_x)**2 + (center_y - frame_center_y)**2)
             max_distance = np.sqrt(frame_center_x**2 + frame_center_y**2)
-            center_score = (1 - distance_from_center / max_distance) * 0.25
-            depth_quality_score = valid_depth_ratio * 0.15
-            score = area_score + center_score + depth_quality_score
-            
+            center_score = (1 - distance_from_center / max_distance) * 0.3
+            score = area_score + center_score
+
             objects.append({
                 'label': f'Object_{i+1}',
                 'confidence': 0.95,
                 'bbox': [int(x), int(y), int(w), int(h)],
-                'depth_mm': avg_depth,
                 'detection_method': 'contour',
-                'valid_depth_ratio': valid_depth_ratio,
-                'valid_depth_pixels': len(valid_depth),
                 'score': score,
                 'width_mm': width_mm,
                 'height_mm': height_mm
@@ -2666,7 +1960,7 @@ def detect_by_contour(frame, depth):
                 print(f"[CONTOUR MULTI] ✅ Selected {len(selected_objects)} objects (top {len(selected_objects)} by score)")
                 for idx, obj in enumerate(selected_objects):
                     x, y, w, h = obj['bbox']
-                    print(f"  [{idx+1}] area={w*h:.0f}px, depth={obj['depth_mm']:.0f}mm, "
+                    print(f"  [{idx+1}] area={w*h:.0f}px, "
                           f"score={obj['score']:.2f}, size={obj['width_mm']:.1f}x{obj['height_mm']:.1f}mm")
             else:
                 # โหมดเดิม: เลือกแค่ 1 วัตถุที่ดีที่สุด
@@ -2694,7 +1988,7 @@ def detect_by_contour(frame, depth):
                 objects = [best_object]
                 
                 print(f"[CONTOUR] ✅ Selected BEST: [{best_object['label']}] "
-                      f"area={w*h:.0f}px, depth={best_object['depth_mm']:.0f}mm, "
+                      f"area={w*h:.0f}px, "
                       f"score={best_object['score']:.2f}, size={width_mm:.1f}x{height_mm:.1f}mm")
                 print(f"[CONTOUR DEBUG] Returning bbox={best_object['bbox']}")
         else:
@@ -2737,103 +2031,6 @@ def detect_by_contour(frame, depth):
         print(f" detect_by_contour: {e}")
         with frame_lock:
             latest_contour_mask = None
-        return []
-
-def detect_by_depth_fallback(frame, depth_mm):
-    """Depth-based detection (เดิม)"""
-    try:
-        frame_h, frame_w = frame.shape[:2]
-        
-        # Depth preprocessing
-        depth_smooth = cv2.medianBlur(depth_mm.astype(np.uint16), 5).astype(np.float32)
-        
-        # Depth mask - objects in range 500-1200mm
-        depth_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
-        depth_mask[(depth_smooth > 500) & (depth_smooth < 1200)] = 255
-        
-        # Edge detection from RGB
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        edges = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
-        
-        # Combine depth + edges
-        combined_mask = cv2.bitwise_and(depth_mask, edges)
-        
-        # Morphology
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_DILATE, kernel, iterations=2)
-        
-        # Find contours
-        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        detections = []
-        min_area = 50   # ✅ ลดเป็น 50 เพื่อรองรับวัตถุเล็กถึง 3x3mm
-        max_area = (frame_w * frame_h) * 0.35
-        
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < min_area or area > max_area:
-                continue
-            
-            x, y, w, h = cv2.boundingRect(contour)
-            if w < 5 or h < 5:  # ✅ ลดเป็น 5 pixels (≈3mm)
-                continue
-            
-            aspect_ratio = float(w) / h if h > 0 else 0
-            if aspect_ratio < 0.3 or aspect_ratio > 4:
-                continue
-            
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            if hull_area > 0:
-                solidity = area / hull_area
-                if solidity < 0.7:
-                    continue
-            
-            # Depth validation
-            roi_depth = depth_smooth[y:y+h, x:x+w]
-            valid_roi_mask = (roi_depth > 500) & (roi_depth < 1200)
-            valid_depth = roi_depth[valid_roi_mask]
-            
-            if len(valid_depth) < (w * h * 0.5):
-                continue
-            
-            avg_depth = float(np.median(valid_depth))
-            min_depth = float(np.min(valid_depth))
-            std_depth = float(np.std(valid_depth))
-            
-            # Depth uniformity
-            if std_depth > 50:
-                continue
-            
-            # ขยายกรอบเพิ่ม 8%
-            expand = 0.08
-            expand_w = int(w * expand)
-            expand_h = int(h * expand)
-            x = max(0, x - expand_w)
-            y = max(0, y - expand_h)
-            w = min(frame_w - x, w + 2 * expand_w)
-            h = min(frame_h - y, h + 2 * expand_h)
-            
-            # คำนวณ confidence
-            coverage = len(valid_depth) / (w * h) if (w * h) > 0 else 0
-            confidence = min(0.95, 0.75 + (coverage * 0.2))
-            
-            detection = {
-                'label': 'Object',
-                'confidence': float(confidence),
-                'bbox': [int(x), int(y), int(w), int(h)],
-                'avgDepth': avg_depth,
-                'minDepth': min_depth
-            }
-            
-            detections.append(detection)
-        
-        return detections
-        
-    except Exception as e:
-        print(f"Error in detect_by_depth_fallback: {e}")
         return []
 
 # API Routes
@@ -3213,152 +2410,6 @@ def list_cameras():
             'message': f'Error listing cameras: {str(e)}'
         }), 500
 
-@app.route('/api/depth/measure-point', methods=['GET'])
-def measure_depth_point():
-    """Measure depth at a specific point/region for calibration and analysis"""
-    global latest_depth, latest_frame, camera_active
-    
-    if not camera_active or latest_depth is None:
-        return jsonify({
-            'success': False,
-            'message': 'Camera not active or no depth data available'
-        }), 400
-    
-    try:
-        with frame_lock:
-            depth = latest_depth.copy()
-            frame = latest_frame.copy() if latest_frame is not None else None
-        
-        # Get region parameter
-        region = request.args.get('region', 'center')  # 'center', 'center-bottom', 'custom'
-        
-        h, w = depth.shape
-        
-        # Define ROI based on region
-        if region == 'center':
-            # Center 20% of frame (for measuring object top)
-            roi_w = int(w * 0.2)
-            roi_h = int(h * 0.2)
-            roi_x = (w - roi_w) // 2
-            roi_y = (h - roi_h) // 2
-            roi_color = (255, 0, 0)  # Blue for object top
-            roi_label = "OBJECT TOP"
-        elif region == 'center-bottom':
-            # Center-bottom 20% (for measuring ground/floor)
-            roi_w = int(w * 0.2)
-            roi_h = int(h * 0.15)
-            roi_x = (w - roi_w) // 2
-            roi_y = h - roi_h - int(h * 0.1)  # 10% from bottom
-            roi_color = (0, 255, 0)  # Green for ground
-            roi_label = "GROUND/FLOOR"
-        else:
-            # Default to center
-            roi_w = int(w * 0.2)
-            roi_h = int(h * 0.2)
-            roi_x = (w - roi_w) // 2
-            roi_y = (h - roi_h) // 2
-            roi_color = (255, 255, 0)  # Cyan
-            roi_label = "MEASUREMENT"
-        
-        # Extract ROI depth values
-        roi_depth = depth[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
-        
-        # Filter valid depth values (300-3000mm)
-        valid_mask = (roi_depth > 300) & (roi_depth < 3000)
-        valid_depths = roi_depth[valid_mask]
-        
-        if len(valid_depths) < 10:
-            return jsonify({
-                'success': False,
-                'message': 'Insufficient valid depth data in the selected region'
-            }), 400
-        
-        # Calculate statistics
-        min_depth = float(np.min(valid_depths))
-        max_depth = float(np.max(valid_depths))
-        avg_depth = float(np.mean(valid_depths))
-        median_depth = float(np.median(valid_depths))
-        std_depth = float(np.std(valid_depths))
-        
-        # Use median as the most reliable measurement (less affected by outliers)
-        measured_distance = median_depth
-        
-        # Create visualization image if frame available
-        visualization_image = None
-        if frame is not None:
-            vis_frame = frame.copy()
-            
-            # Draw ROI rectangle
-            cv2.rectangle(vis_frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), roi_color, 3)
-            
-            # Draw label
-            label_bg_height = 40
-            cv2.rectangle(vis_frame, (roi_x, roi_y - label_bg_height), 
-                         (roi_x + roi_w, roi_y), roi_color, -1)
-            cv2.putText(vis_frame, roi_label, (roi_x + 5, roi_y - 25), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(vis_frame, f"{measured_distance:.1f} mm", (roi_x + 5, roi_y - 8), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-            
-            # Draw depth heatmap overlay on ROI
-            roi_depth_normalized = np.clip((roi_depth - 300) / (3000 - 300) * 255, 0, 255).astype(np.uint8)
-            roi_depth_colored = cv2.applyColorMap(roi_depth_normalized, cv2.COLORMAP_JET)
-            
-            # Blend with original frame in ROI area
-            alpha = 0.4
-            vis_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w] = cv2.addWeighted(
-                vis_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w], 1 - alpha,
-                roi_depth_colored, alpha, 0
-            )
-            
-            # Add statistics overlay
-            stats_y = 30
-            cv2.rectangle(vis_frame, (10, 10), (300, 150), (0, 0, 0), -1)
-            cv2.rectangle(vis_frame, (10, 10), (300, 150), roi_color, 2)
-            cv2.putText(vis_frame, f"Region: {roi_label}", (20, stats_y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(vis_frame, f"Distance: {measured_distance:.1f} mm", (20, stats_y + 25), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            cv2.putText(vis_frame, f"Range: {min_depth:.0f}-{max_depth:.0f} mm", (20, stats_y + 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            cv2.putText(vis_frame, f"Std Dev: {std_depth:.1f} mm", (20, stats_y + 70), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            cv2.putText(vis_frame, f"Samples: {len(valid_depths)}", (20, stats_y + 90), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            
-            # Encode to base64
-            _, buffer = cv2.imencode('.jpg', vis_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])  # ✅ ลดเป็น 50%
-            img_base64 = base64.b64encode(buffer).decode('utf-8')
-            visualization_image = f"data:image/jpeg;base64,{img_base64}"
-        
-        return jsonify({
-            'success': True,
-            'distance': measured_distance,
-            'min_depth': min_depth,
-            'max_depth': max_depth,
-            'avg_depth': avg_depth,
-            'median_depth': median_depth,
-            'std_depth': std_depth,
-            'sample_count': int(len(valid_depths)),
-            'region': region,
-            'roi': {
-                'x': int(roi_x),
-                'y': int(roi_y),
-                'width': int(roi_w),
-                'height': int(roi_h)
-            },
-            'visualization': visualization_image
-        })
-        
-    except Exception as e:
-        print(f"Error in measure_depth_point: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'message': str(e)
-        }), 500
-
 @app.route('/api/camera/contour/start', methods=['POST'])
 def start_contour_detection():
     """Start Contour Detection mode (Background Subtraction)"""
@@ -3591,8 +2642,6 @@ def get_current_measurement():
                 'image': None,
                 'timestamp': datetime.now().isoformat()
             },
-            'contrastFrame': None,
-            'depthFrame': None,
             'measurements': {
                 'width': 0,
                 'height': 0,
@@ -3614,8 +2663,6 @@ def get_current_measurement():
                 'image': None,
                 'timestamp': datetime.now().isoformat()
             },
-            'contrastFrame': None,
-            'depthFrame': None,
             'measurements': {
                 'width': 0,
                 'height': 0,
@@ -3632,13 +2679,9 @@ def get_current_measurement():
         start_time = time.time()
         timeout_seconds = 5  # 5 วินาที
         
-        # Get query parameters for image enhancement
-        enable_contrast = request.args.get('contrast', 'false').lower() == 'true'
-        depth_colorscheme = request.args.get('colorScheme', 'gray')  # gray, jet, rainbow, turbo, hot, cool
-        
-        # Get main frame (RGB with detections, no modifications)
-        frame = get_camera_frame(enable_contrast=False, depth_colorscheme=depth_colorscheme)
-        
+        # Get main frame (RGB with detections)
+        frame = get_camera_frame()
+
         # ✅ Check timeout
         if time.time() - start_time > timeout_seconds:
             print(f"[TIMEOUT] get_camera_frame took too long")
@@ -3716,23 +2759,11 @@ def get_current_measurement():
             }
             selected_object_index = -1  # No object selected
         
-        # Get contrast preview if enabled
-        contrast_frame = None
-        if enable_contrast:
-            contrast_frame = get_contrast_preview()
-            print(f"[DEBUG] Contrast frame generated: {contrast_frame is not None}")
-        
-        # Get depth preview
-        depth_frame = get_depth_preview(depth_colorscheme)
-        print(f"[DEBUG] Depth frame generated: {depth_frame is not None}")
-        
         return jsonify({
             'frame': {
                 'image': frame,
                 'timestamp': datetime.now().isoformat()
             },
-            'contrastFrame': contrast_frame,
-            'depthFrame': depth_frame,
             'measurements': primary_measurement,
             'allMeasurements': all_measurements,
             'zoneMeasurements': zone_measurements,  # 🎯 เพิ่ม zone measurements
@@ -3750,8 +2781,6 @@ def get_current_measurement():
                 'image': None,
                 'timestamp': datetime.now().isoformat()
             },
-            'contrastFrame': None,
-            'depthFrame': None,
             'measurements': {
                 'width': 0,
                 'height': 0,
