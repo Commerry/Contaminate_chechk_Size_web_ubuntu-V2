@@ -241,9 +241,7 @@ const emit = defineEmits([
   'open-machines',
   'open-configurations',
   'open-lots',
-  'close', 
-  'update:contrast', 
-  'update:colorScheme', 
+  'close',
   'update:zoom',
   'predict-image',
   'preview-image',
@@ -333,9 +331,6 @@ onUnmounted(() => {
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
 })
 
-// Image enhancement controls
-const contrastEnabled = ref(false)
-const selectedColorScheme = ref('gray')
 const zoomLevel = ref(1.0)
 
 // ⭐ Multi-object detection control
@@ -355,18 +350,12 @@ const loadConfig = async () => {
       const config = data.config
       
       // Load all saved settings
-      contrastEnabled.value = config.height_on === 1
-      selectedColorScheme.value = config.depth_color_scheme || 'gray'
       zoomLevel.value = config.zoom_level || 1.0
-      
+
       // Emit initial values to parent
-      emit('update:contrast', contrastEnabled.value)
-      emit('update:colorScheme', selectedColorScheme.value)
       emit('update:zoom', zoomLevel.value)
-      
+
       console.log('[Config] ✅ Loaded saved settings:', {
-        contrast: contrastEnabled.value,
-        colorScheme: selectedColorScheme.value,
         zoom: zoomLevel.value
       })
     }
@@ -392,47 +381,6 @@ const loadRubberType = async () => {
 // Auto-load config on mount
 loadConfig()
 loadRubberType()
-
-const toggleContrast = async () => {
-  contrastEnabled.value = !contrastEnabled.value
-  emit('update:contrast', contrastEnabled.value)
-  
-  // Save to backend config
-  try {
-    await fetch(`${API_BASE}/api/config/set`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        key: 'height_on',
-        value: contrastEnabled.value ? 1 : 0
-      })
-    })
-  } catch (error) {
-    console.error('[Config] Failed to save contrast:', error)
-  }
-  
-  console.log('Contrast enabled:', contrastEnabled.value)
-}
-
-const updateColorScheme = async () => {
-  emit('update:colorScheme', selectedColorScheme.value)
-  
-  // Save to backend config
-  try {
-    await fetch(`${API_BASE}/api/config/set`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        key: 'depth_color_scheme',
-        value: selectedColorScheme.value
-      })
-    })
-  } catch (error) {
-    console.error('[Config] Failed to save color scheme:', error)
-  }
-  
-  console.log('Color scheme changed to:', selectedColorScheme.value)
-}
 
 const updateZoom = async () => {
   emit('update:zoom', zoomLevel.value)

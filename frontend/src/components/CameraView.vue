@@ -41,19 +41,6 @@
         </div>
       </div>
     </div>
-
-    <!-- Depth Map View (Optional) -->
-    <div v-if="showDepthMap" class="card depth-card">
-      <div class="card-header">
-        <h2 class="card-title">
-          <IconSvg name="layers" :size="20" />
-          Depth Map
-        </h2>
-      </div>
-      <div class="depth-viewport">
-        <canvas ref="depthCanvasRef" class="depth-canvas"></canvas>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -93,15 +80,10 @@ const props = defineProps({
   statusMessage: {
     type: String,
     default: 'Click "Start Camera" to begin'
-  },
-  showDepthMap: {
-    type: Boolean,
-    default: false
   }
 })
 
 const canvasRef = ref(null)
-const depthCanvasRef = ref(null)
 const currentFps = ref(30)
 const resolution = ref('1920x1080')
 

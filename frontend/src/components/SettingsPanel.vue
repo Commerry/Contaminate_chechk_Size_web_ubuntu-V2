@@ -110,16 +110,6 @@
             />
           </div>
 
-          <div class="setting-item">
-            <label class="setting-label">
-              Show Depth Map
-              <span class="setting-description">Display depth map visualization</span>
-            </label>
-            <label class="toggle-switch">
-              <input v-model="localSettings.showDepthMap" type="checkbox" />
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
         </div>
 
         <!-- Measurement Settings -->
@@ -140,36 +130,6 @@
               <option value="m">Meters (m)</option>
               <option value="in">Inches (in)</option>
             </select>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">
-              Min Depth (mm)
-              <span class="setting-description">Minimum detection depth</span>
-            </label>
-            <input 
-              v-model.number="localSettings.minDepth" 
-              type="number" 
-              min="100" 
-              max="5000" 
-              step="100"
-              class="setting-input"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">
-              Max Depth (mm)
-              <span class="setting-description">Maximum detection depth</span>
-            </label>
-            <input 
-              v-model.number="localSettings.maxDepth" 
-              type="number" 
-              min="500" 
-              max="10000" 
-              step="100"
-              class="setting-input"
-            />
           </div>
 
           <div class="setting-item">
@@ -486,14 +446,11 @@ const localSettings = ref({
   // Camera
   resolution: '1080p',
   fpsLimit: 30,
-  showDepthMap: false,
-  
+
   // Measurement
   measurementUnit: 'mm',
-  minDepth: 300,
-  maxDepth: 3000,
   autoCapture: true,
-  
+
   // Detection
   confidenceThreshold: 0.5,
   minObjectSize: 50,
@@ -555,10 +512,7 @@ const resetToDefaults = () => {
   localSettings.value = {
     resolution: '1080p',
     fpsLimit: 30,
-    showDepthMap: false,
     measurementUnit: 'mm',
-    minDepth: 300,
-    maxDepth: 3000,
     autoCapture: true,
     confidenceThreshold: 0.5,
     minObjectSize: 50,

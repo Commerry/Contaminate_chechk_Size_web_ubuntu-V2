@@ -29,8 +29,6 @@
       @open-calibration="showCalibration = true"
       @open-machines="showMachines = true"
       @open-lots="showLots = true"
-      @update:contrast="handleContrastChange"
-      @update:colorSchemeChange="handleColorSchemeChange"
       @close="closeSidebar"
     />
 
@@ -108,10 +106,7 @@
             :measurements="currentMeasurements"
             :zoneMeasurements="zoneMeasurements"
             :threeZoneMode="threeZoneMode"
-            :contrastFrame="contrastFrame"
-            :depthFrame="depthFrame"
             :contourMask="contourMask"
-            :depthColorScheme="depthColorScheme"
             :detectionStats="detectionStats"
             :activeSetup="activeSetup"
             :machines="machines"
@@ -262,8 +257,6 @@ const sidebarOpen = ref(!isMobileViewport.value)
 const detections = ref([])
 const currentFrame = ref(null)
 const cameraStatusMessage = ref('Click "Start Camera" to begin')
-const contrastFrame = ref(null)
-const depthFrame = ref(null)
 const contourMask = ref(null)  // เพิ่ม contour mask
 const contourMasks = ref({}) // container for multiple mask modes
 const threeZoneMode = ref(false)  // 🎯 3-zone detection mode
@@ -300,9 +293,6 @@ const currentMeasurements = ref({
   hasObject: false
 })
 
-// Image enhancement settings
-const contrastEnabled = ref(false)
-const depthColorScheme = ref('gray')
 const measurementDisplayRef = ref(null)
 
 const uploadProgress = ref(0)
@@ -372,20 +362,8 @@ const settings = ref({
   maxDepth: 3000,
   confidenceThreshold: 0.5,
   measurementUnit: 'mm',
-  autoCapture: true,
-  showDepthMap: false
+  autoCapture: true
 })
-
-// Handle contrast and color scheme updates from Sidebar
-const handleContrastChange = (enabled) => {
-  contrastEnabled.value = enabled
-  console.log('Contrast enabled:', enabled)
-}
-
-const handleColorSchemeChange = (scheme) => {
-  depthColorScheme.value = scheme
-  console.log('Color scheme changed to:', scheme)
-}
 
 // 🖥️ Fetch machine list (each machine carries its target size config)
 const fetchMachines = async () => {
@@ -802,44 +780,15 @@ const startDataPolling = () => {
   // ✅ เริ่ม State Sync Polling (ทุก 2 วินาที)
   startStateSyncPolling()
   
-  // 🔥 MODIFIED: Polling only for PREVIEW FRAMES (contrast/depth/contour mask)
-  // SocketIO handles main frame + detections + measurements
+  // 🔥 Polling only for the contour visualization mask.
+  // SocketIO handles main frame + detections + measurements.
   pollingInterval = setInterval(async () => {
     // Only poll if camera is active
     if (!isCameraActive.value) {
       return
     }
-    
+
     try {
-      // Pass image enhancement options to backend
-      const options = {
-        contrast: contrastEnabled.value,
-        colorScheme: depthColorScheme.value
-      }
-      
-      const data = await store.getMeasurementData(options)
-
-      // FPS is computed from real socket 'frame_update' events (see the socket
-      // handler), not from this 1s preview poll — otherwise it always reads ~1.
-
-      // ❌ REMOVED: Main frame update (SocketIO handles this)
-      // if (data.frame) {
-      //   currentFrame.value = data.frame
-      // }
-      
-      // ✅ Update PREVIEW frames (contrast/depth) - not handled by SocketIO
-      console.log('📊 API Response - contrastFrame:', data.contrastFrame ? 'RECEIVED' : 'NULL')
-      console.log('📊 API Response - depthFrame:', data.depthFrame ? 'RECEIVED' : 'NULL')
-      
-      if (data.contrastFrame) {
-        contrastFrame.value = data.contrastFrame
-        console.log('✅ Contrast frame updated')
-      }
-      if (data.depthFrame) {
-        depthFrame.value = data.depthFrame
-        console.log('✅ Depth frame updated')
-      }
-      
       // ✅ Fetch contour mask if contour detection is active (not handled by SocketIO)
       if (isContourDetecting.value) {
         try {

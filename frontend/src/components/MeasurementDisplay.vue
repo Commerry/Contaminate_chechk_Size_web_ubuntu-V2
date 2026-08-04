@@ -208,21 +208,9 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
-  contrastFrame: {
-    type: String,
-    default: null
-  },
-  depthFrame: {
-    type: String,
-    default: null
-  },
   contourMask: {
     type: Object,
     default: null
-  },
-  depthColorScheme: {
-    type: String,
-    default: 'gray'
   },
   unit: {
     type: String,
