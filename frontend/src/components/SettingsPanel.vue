@@ -83,6 +83,66 @@
           </div>
         </div>
 
+        <!-- Snapshot Trigger (timer / Siemens PLC) -->
+        <div class="settings-section">
+          <h3 class="section-title">
+            <IconSvg name="camera" :size="18" class="section-icon" />
+            Snapshot Trigger (สุ่มเช็ค)
+          </h3>
+
+          <div class="setting-item">
+            <label class="setting-label">
+              Trigger Mode
+              <span class="setting-description">off / ตั้งเวลา / จาก PLC Siemens</span>
+            </label>
+            <select v-model="trigger.mode" class="setting-select" @change="saveTrigger">
+              <option value="off">Off</option>
+              <option value="timer">Timer (ตั้งเวลา)</option>
+              <option value="plc">PLC (snap7)</option>
+            </select>
+          </div>
+
+          <div v-if="trigger.mode === 'timer'" class="setting-item">
+            <label class="setting-label">
+              Interval (seconds)
+              <span class="setting-description">ถ่ายสุ่มทุกกี่วินาที</span>
+            </label>
+            <input v-model.number="trigger.interval_s" type="number" min="1" step="1"
+                   class="setting-input" @change="saveTrigger" />
+          </div>
+
+          <template v-if="trigger.mode === 'plc'">
+            <div class="camera-source-toolbar">
+              <span class="camera-vendors">
+                snap7: {{ triggerStatus.snap7_available ? 'available' : 'NOT installed' }}
+                · PLC: {{ triggerStatus.plc && triggerStatus.plc.connected ? 'connected' : 'disconnected' }}
+              </span>
+            </div>
+            <div class="setting-item">
+              <label class="setting-label">PLC IP</label>
+              <input v-model="trigger.plc_ip" type="text" placeholder="192.168.0.1"
+                     class="setting-input" @change="saveTrigger" />
+            </div>
+            <div class="trigger-grid">
+              <label>Rack<input v-model.number="trigger.plc_rack" type="number" min="0" @change="saveTrigger" /></label>
+              <label>Slot<input v-model.number="trigger.plc_slot" type="number" min="0" @change="saveTrigger" /></label>
+              <label>DB<input v-model.number="trigger.plc_db" type="number" min="0" @change="saveTrigger" /></label>
+              <label>Byte<input v-model.number="trigger.plc_byte" type="number" min="0" @change="saveTrigger" /></label>
+              <label>Bit<input v-model.number="trigger.plc_bit" type="number" min="0" max="7" @change="saveTrigger" /></label>
+              <label>Poll s<input v-model.number="trigger.plc_poll_s" type="number" min="0.05" step="0.05" @change="saveTrigger" /></label>
+            </div>
+          </template>
+
+          <div class="camera-source-toolbar">
+            <span class="camera-vendors">fired: {{ triggerStatus.fire_count || 0 }}
+              <template v-if="triggerStatus.last_error"> · err: {{ triggerStatus.last_error }}</template>
+            </span>
+            <button class="btn btn-secondary btn-sm" @click="fireTrigger">
+              <IconSvg name="camera" :size="14" /> ถ่ายทดสอบ
+            </button>
+          </div>
+        </div>
+
         <!-- Camera Settings -->
         <div class="settings-section">
           <h3 class="section-title">
@@ -497,6 +557,53 @@ const scanCameras = async () => {
   }
 }
 
+// ---- Snapshot trigger (timer / Siemens PLC) ----
+const trigger = ref({
+  mode: 'off', interval_s: 10,
+  plc_ip: '', plc_rack: 0, plc_slot: 1, plc_db: 1, plc_byte: 0, plc_bit: 0, plc_poll_s: 0.2
+})
+const triggerStatus = ref({ snap7_available: false, plc: {}, fire_count: 0, last_error: '' })
+
+const loadTriggerStatus = async () => {
+  try {
+    const r = await axios.get('/api/trigger/status')
+    const s = r.data.status || {}
+    triggerStatus.value = s
+    // seed the editable form from the backend on first load
+    trigger.value.mode = s.mode || 'off'
+    if (s.interval_s) trigger.value.interval_s = s.interval_s
+    if (s.plc) {
+      const p = s.plc
+      Object.assign(trigger.value, {
+        plc_ip: p.ip || '', plc_rack: p.rack ?? 0, plc_slot: p.slot ?? 1,
+        plc_db: p.db ?? 1, plc_byte: p.byte ?? 0, plc_bit: p.bit ?? 0, plc_poll_s: p.poll_s ?? 0.2
+      })
+    }
+  } catch (e) { /* trigger endpoints may be absent on older backend */ }
+}
+
+const saveTrigger = async () => {
+  try {
+    const r = await axios.post('/api/trigger/config', { ...trigger.value })
+    if (r.data.success) {
+      triggerStatus.value = r.data.status
+      showToast('บันทึก trigger แล้ว', 'success')
+    }
+  } catch (e) {
+    showToast(e.response?.data?.message || 'บันทึก trigger ไม่สำเร็จ', 'error')
+  }
+}
+
+const fireTrigger = async () => {
+  try {
+    await axios.post('/api/trigger/fire')
+    showToast('ถ่ายทดสอบแล้ว', 'success')
+    setTimeout(loadTriggerStatus, 400)
+  } catch (e) {
+    showToast('ถ่ายไม่สำเร็จ', 'error')
+  }
+}
+
 // Pin the camera the next connect will use ('' vendor = auto-detect)
 const selectCamera = async (vendor, deviceId) => {
   try {
@@ -536,9 +643,10 @@ const resetToDefaults = () => {
   }
 }
 
-// ✅ Scan cameras on mount
+// ✅ Scan cameras + load trigger status on mount
 onMounted(() => {
   scanCameras()
+  loadTriggerStatus()
 })
 </script>
 
@@ -1074,6 +1182,27 @@ onMounted(() => {
 
 .camera-item {
   cursor: pointer;
+}
+
+.trigger-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 8px 0;
+}
+.trigger-grid label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: var(--text-secondary);
+  gap: 4px;
+}
+.trigger-grid input {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text-primary);
 }
 
 .camera-item.active {
