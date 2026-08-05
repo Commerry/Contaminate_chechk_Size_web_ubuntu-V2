@@ -211,8 +211,12 @@ except Exception as _depthai_err:
     print(f"[Startup] ⚠️ depthai not available ({_depthai_err}); running without OAK camera support")
 from python_scripts.camera_lock import acquire_lock, release_lock
 from python_scripts.cameras import registry as camera_registry
+from python_scripts.trigger_manager import TriggerManager
 import threading
 import time
+
+# Snapshot trigger (timer / Siemens PLC via snap7). Instantiated in __main__.
+trigger_manager = None
 
 # Active camera backend (Luxonis / Hikvision / Basler). The rest of the app
 # talks to the camera only through this - see python_scripts/cameras/.
@@ -4397,13 +4401,24 @@ def delete_lot(lot_id):
 @app.route('/api/capture', methods=['POST'])
 def capture_image_with_watermark():
     """Capture current frame with colored ROI boxes and professional watermark"""
+    data = request.json or {}
+    return perform_capture(data.get('lot', {}), data.get('machine', {}),
+                           data.get('rubber_type'))
+
+
+def perform_capture(lot_info=None, machine_info=None, rubber_type_val=None):
+    """Draw ROI boxes + banner on the current frame, save it, and log a capture
+    session to the DB. Shared by the /api/capture endpoint and the trigger
+    manager so a timer/PLC snapshot is identical to a manual one.
+
+    Returns a Flask JSON response (used directly by the endpoint; the trigger
+    calls it inside an app context and ignores the return).
+    """
     try:
-        data = request.json
-        
-        # Get watermark information
-        lot_info = data.get('lot', {})
-        machine_info = data.get('machine', {})
-        
+        lot_info = lot_info or {}
+        machine_info = machine_info or {}
+        data = {'rubber_type': rubber_type_val if rubber_type_val is not None else rubber_type}
+
         # Get current frame — always use raw frame as base so we
         # can draw fresh coloured ROI boxes + banner without double-annotations
         with frame_lock:
@@ -4658,6 +4673,68 @@ def capture_image_with_watermark():
 # ═══════════════════════════════════════════════════════════════════════════
 # 🔌 POWER CONTROL API (Wake-on-LAN, Shutdown, Reboot)
 # ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 📸 SNAPSHOT TRIGGER (timer / Siemens PLC via snap7)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _trigger_capture():
+    """Called by the TriggerManager on a timer tick or PLC rising edge.
+
+    Grabs the current measurements and saves a capture, exactly like the manual
+    button, using the active machine/lot. Runs in the trigger thread, so wrap
+    the DB/jsonify work in an app context.
+    """
+    if not camera_active:
+        print("[TRIGGER] skipped - camera not active")
+        return
+    lot_info = {'id': active_lot_id or '', 'name': active_lot_name or '',
+                'type': (active_measurement_config or {}).get('type', '') if active_measurement_config else ''}
+    machine_info = {'id': active_machine_id or '', 'name': active_machine_name or ''}
+    with app.app_context():
+        perform_capture(lot_info, machine_info, rubber_type)
+
+
+@app.route('/api/trigger/status', methods=['GET'])
+def trigger_status():
+    """Report trigger mode, PLC connection, fire count."""
+    if trigger_manager is None:
+        return jsonify({'success': True, 'status': {'mode': 'off', 'running': False,
+                                                    'snap7_available': False}})
+    return jsonify({'success': True, 'status': trigger_manager.status()})
+
+
+@app.route('/api/trigger/config', methods=['POST'])
+def trigger_config():
+    """Update trigger settings (mode timer/plc, interval, PLC connection)."""
+    if trigger_manager is None:
+        return jsonify({'success': False, 'message': 'Trigger manager not initialized'}), 503
+    try:
+        d = request.get_json() or {}
+        trigger_manager.configure(
+            mode=d.get('mode'),
+            interval_s=d.get('interval_s'),
+            plc_ip=d.get('plc_ip'),
+            plc_rack=d.get('plc_rack'),
+            plc_slot=d.get('plc_slot'),
+            plc_db=d.get('plc_db'),
+            plc_byte=d.get('plc_byte'),
+            plc_bit=d.get('plc_bit'),
+            plc_poll_s=d.get('plc_poll_s'),
+        )
+        return jsonify({'success': True, 'status': trigger_manager.status()})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/trigger/fire', methods=['POST'])
+def trigger_fire():
+    """Fire a snapshot capture right now (manual test button)."""
+    if trigger_manager is None:
+        return jsonify({'success': False, 'message': 'Trigger manager not initialized'}), 503
+    trigger_manager.fire_now(reason='manual')
+    return jsonify({'success': True, 'message': 'Triggered'})
+
 
 @app.route('/api/power/wake', methods=['POST'])
 def power_wake_on_lan():
@@ -5103,6 +5180,13 @@ if __name__ == '__main__':
         watchdog_thread.start()
     else:
         print("[WATCHDOG] no camera SDK available - watchdog idle")
+
+    # 📸 Snapshot trigger (timer / Siemens PLC). Starts if a mode was saved.
+    trigger_manager = TriggerManager(on_fire=_trigger_capture, config_store=system_config)
+    if trigger_manager.mode != 'off':
+        trigger_manager.start()
+    print(f"[TRIGGER] initialized (mode={trigger_manager.mode}, "
+          f"snap7={'yes' if trigger_manager.status()['snap7_available'] else 'no'})")
     
     # Restore rubber type
     saved_rubber_type = system_config.get('rubber_type', 'black')

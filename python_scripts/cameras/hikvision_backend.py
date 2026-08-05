@@ -97,6 +97,16 @@ class HikvisionBackend(CameraBackend):
 
             # Continuous acquisition; set frame rate if requested.
             cam.MV_CC_SetEnumValue("TriggerMode", 0)
+
+            # Let the camera self-adjust brightness/colour (Continuous auto).
+            # Values: 0=Off, 1=Once, 2=Continuous. Ignore failures (node names
+            # vary slightly by model/firmware).
+            for node in ("ExposureAuto", "GainAuto", "BalanceWhiteAuto"):
+                try:
+                    cam.MV_CC_SetEnumValue(node, 2)
+                except Exception:
+                    pass
+
             fps = int((config or {}).get("fps", 0))
             if fps > 0:
                 try:
