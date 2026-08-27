@@ -1448,22 +1448,27 @@ def detect_by_contour(frame):
         specular = cv2.dilate(specular, np.ones((3, 3), np.uint8), iterations=1)
         binary_deviation = cv2.bitwise_and(binary_deviation, cv2.bitwise_not(specular))
 
-        # === STEP 5: รวม threshold ตายตัวกับ deviation ===
-        combined_mask = cv2.bitwise_or(binary_dark, binary_deviation)
-        
-        # === STEP 6: Morphology - เชื่อมวัตถุที่เป็นชิ้นเดียวกัน ===
-        # Crevices and internal shadows cut a single lump into fragments, so the
-        # gaps to bridge are wider than the previous 5x5 kernel could reach.
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        # === STEP 5-6: build mask + morphology (mode dependent) ===
         kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
-        # CLOSE: เชื่อมช่องว่างภายในวัตถุ
-        binary_morphed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close, iterations=3)
-        # OPEN: ลบ noise เล็กๆ (ลด iterations 2→1)
-        binary_morphed = cv2.morphologyEx(binary_morphed, cv2.MORPH_OPEN, kernel_open, iterations=1)
-        
-        # ❌ ลบ erode ออก - เพราะทำให้วัตถุชิ้นเดียวแยกเป็นหลายชิ้น
-        
+        if rubber_type == "white":
+            # White objects on a dark belt: the DARK threshold already isolates
+            # each piece cleanly (see the 4.Dark panel). The deviation mask +
+            # heavy 9x9 close were tuned for pale crumbs on grey and here just
+            # bridge separate pieces into one giant blob. Use DARK alone and a
+            # light close that fills pin-holes without merging neighbours.
+            combined_mask = binary_dark
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            binary_morphed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+            binary_morphed = cv2.morphologyEx(binary_morphed, cv2.MORPH_OPEN, kernel_open, iterations=1)
+        else:
+            # Dark rubber on a light tray: combine the fixed threshold with the
+            # deviation mask and bridge crevices/internal shadows within a lump.
+            combined_mask = cv2.bitwise_or(binary_dark, binary_deviation)
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            binary_morphed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close, iterations=3)
+            binary_morphed = cv2.morphologyEx(binary_morphed, cv2.MORPH_OPEN, kernel_open, iterations=1)
+
         binary_final = binary_morphed
         
         # === STEP 7: Find contours ===
