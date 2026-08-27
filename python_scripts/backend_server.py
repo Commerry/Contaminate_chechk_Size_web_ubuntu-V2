@@ -1490,7 +1490,9 @@ def detect_by_contour(frame):
         
         # ⭐ Contour detection thresholds (optimized for small objects down to 3mm)
         min_area = 50   # Minimum contour area in pixels (≈3mm x 3mm)
-        max_area = frame_w * frame_h * 0.25  # Anything bigger is background
+        # A blob this large is the belt/tray or a whole merged pile - not one
+        # piece. Kept generous so a big single reference object is still allowed.
+        max_area = frame_w * frame_h * 0.6
         min_size = 5    # Minimum width/height in pixels (≈3mm)
         print(f"[CONTOUR] Using thresholds: min_area={min_area}px, min_size={min_size}x{min_size}px")
         
@@ -1551,16 +1553,18 @@ def detect_by_contour(frame):
                     print(f"  [SKIP] Contour {i}: diffuse shape, solidity {solidity:.2f} < 0.45")
                 continue
 
-            # Glint rejection. A small, blown-out white blob is a reflection off
-            # the tray, not a crumb: rubber never saturates the sensor the way a
-            # specular point does. Only small blobs are judged so a genuinely
-            # bright but sizeable piece is never thrown away.
-            roi_gray = gray[y:y+h, x:x+w]
-            median_bright = float(np.median(roi_gray)) if roi_gray.size else 0
-            if area < 400 and median_bright >= 235:
-                if i < 5:
-                    print(f"  [SKIP] Contour {i}: glint (area={area:.0f}px, brightness={median_bright:.0f})")
-                continue
+            # Glint rejection - ONLY for dark ("black") rubber, where a small
+            # blown-out white blob is a reflection off the light tray. In white-
+            # rubber mode the object itself is bright, so rejecting bright blobs
+            # would throw the real pieces away (this is why white squares on a
+            # dark belt were not detected).
+            if rubber_type != "white":
+                roi_gray = gray[y:y+h, x:x+w]
+                median_bright = float(np.median(roi_gray)) if roi_gray.size else 0
+                if area < 400 and median_bright >= 235:
+                    if i < 5:
+                        print(f"  [SKIP] Contour {i}: glint (area={area:.0f}px, brightness={median_bright:.0f})")
+                    continue
             
             # ✅ ขนาดจาก pixel * calibration (ไม่ใช้ depth)
             width_mm = w * current_settings['calibration_width']
